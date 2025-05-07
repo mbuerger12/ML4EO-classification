@@ -8,6 +8,10 @@ All the subtasks for the different sections
   - work with histograms
 - Implement different dataset splits for comparison
 - look at different modalities
+- People
+  - Joanna
+  - Max
+
 
 
 ### Models
@@ -16,9 +20,12 @@ All the subtasks for the different sections
   - Transformer
   - Random Forrest
 - People
-  - Max
-  - 
+  - Shafi 
+  - moez
 
 ### Benchmarking
 - research benchmark options
 - research metrics 
+- people
+  - liang
+  - noe
