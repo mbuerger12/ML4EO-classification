@@ -1,3 +1,5 @@
+from tqdm import tqdm
+import wandb
 from dataset import LCZDataset
 from torch.utils.data import DataLoader
 import torch
@@ -6,9 +8,149 @@ import segmentation_models_pytorch as smp
 from torch import optim
 import numpy as np
 from sklearn.metrics import accuracy_score,precision_recall_fscore_support,  jaccard_score, classification_report
+import argparse
+from collections import defaultdict
+import os
+from utils.helper_functions import new_log, to_cuda
+import time
+from arguments import train_parser
+
+class Trainer:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.model = smp.Segformer(
+        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
+        encoder_weights="imagenet",  # pretrained weights
+        in_channels=244,  # e.g. 4+10 bands
+        classes=18,  # LCZ classes
+        activation=None  # we'll use raw logits + CrossEntropyLoss
+        )
+
+        self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
+                                                                          args)[0]
+        self.dataloaders = self.get_dataloaders(args)
+        wandb.init(project=args.wandb_project, dir=self.experiment_folder)
+        wandb.config.update(self.args)
+        self.writer = None
+        self.batch_size = args.batch_size
+        self.num_epochs = args.num_epochs
+        self.w_decay = 0.0001
+
+        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=self.w_decay)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.001, total_steps=self.batch_size*self.num_epochs, pct_start=0.1, anneal_strategy='cos', cycle_momentum=False)
+        self.epoch = 0
+        self.iter = 0
+        self.train_stats = defaultdict(lambda: np.nan)
+        self.val_stats = defaultdict(lambda: np.nan)
+        self.best_optimization_loss = np.inf
+
+    def __del__(self):
+        pass
+
+    def train(self):
+        with tqdm(range(self.epoch, self.args.num_epochs), leave=True) as tnr:
+            tnr.set_postfix(training_loss=np.nan, validation_loss=np.nan, best_validation_loss=np.nan)
+            for _ in tnr:
+                self.train_epoch(tnr)
+
+                if (self.epoch + 1) % self.args.val_every_n_epochs == 0:
+                    self.validate()
+
+                    if self.args.save_model in ['last', 'both']:
+                        self.save_model('last')
+
+                if self.args.lr_scheduler == 'step':
+                    self.scheduler.step()
+                    if self.use_wandb:
+                        wandb.log({'log_lr': np.log10(self.scheduler.get_last_lr())}, self.iter)
+                    else:
+                        self.writer.add_scalar('log_lr', np.log10(self.scheduler.get_last_lr()), self.epoch)
+
+                self.epoch += 1
+
+    def train_epoch(self, tnr=None):
+        self.train_stats = defaultdict(float)
+        self.model.train()
+        with tqdm(self.dataloaders['train'], leave=False) as inner_tnr:
+            inner_tnr.set_postfix(training_loss=np.nan)
+            for i, sample in enumerate(inner_tnr):
+                self.optimizer.zero_grad()
+                sample = to_cuda(sample)
+                output = self.model(sample['image'])
+                loss = F.cross_entropy(output, sample['label'].long())
+                self.train_stats["loss"] += loss.detach().cpu().item()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                self.iter += 1
+
+                if (i + 1) % min(self.args.logstep_train, len(self.dataloaders.datasets['train'])) == 0:
+                    self.train_stats = {k: v / self.args.logstep_train for k, v in self.train_stats.items()}
+
+                    inner_tnr.set_postfix(training_loss=self.train_stats['loss'])
+                    if tnr is not None:
+                        tnr.set_postfix(training_loss=self.train_stats['loss'],
+                                        validation_loss=self.val_stats['loss'],
+                                        best_validation_loss=self.best_optimization_loss)
+
+                    if self.use_wandb:
+                        wandb.log({k + '/train': v for k, v in self.train_stats.items()}, self.iter)
+                    else:
+                        for key in self.train_stats:
+                            self.writer.add_scalar('train/' + key, self.train_stats[key], self.iter)
+
+                    # reset metrics
+                    self.train_stats = defaultdict(float)
+    def validate(self):
+        pass
+
+    def save_model(self):
+        pass
+
+    def get_dataloaders(self, args):
+        if args.dataset == 'berlin':
+            train_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
+                                  "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None)
+            val_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif",
+                                64, 32, transforms=None)
+
+            # 3) Create DataLoaders
+            train_loader = DataLoader(
+                train_ds,
+                batch_size=8,
+                shuffle=True,
+                num_workers=4,
+                pin_memory=True
+            )
+
+            val_loader = DataLoader(
+                val_ds,
+                batch_size=8,
+                shuffle=False,
+                num_workers=4,
+                pin_memory=True
+            )
+
+            return {'train': train_loader, 'val': val_loader}
+
 
 
 if __name__ == '__main__':
+    print(torch.cuda.is_available())
+    print(torch.version.cuda)
+    torch.cuda.empty_cache()  # Clear unused memory in PyTorch's cache
+    args = train_parser.parse_args()
+    print(train_parser.format_values())
+    trainer = Trainer(args)
+
+    since = time.time()
+    trainer.train()
+    time_elapsed = time.time() - since
+    print('Training completed in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
+
+
+
+
     num_epochs = 100
     in_chans = 244
     num_classes = 17
@@ -119,3 +261,6 @@ if __name__ == '__main__':
         print(f"Mean IoU      : {mean_iou:.4f}")
         for lbl, p, r, f, iou in zip(present_labels, prec, rec, f1, ious):
             print(f"LCZ {int(lbl):2d} → P {p:.3f}, R {r:.3f}, F1 {f:.3f}, IoU {iou:.3f}")
+
+
+

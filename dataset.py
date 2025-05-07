@@ -31,7 +31,10 @@ class LCZDataset(Dataset):
 
         source = torch.cat((s2_patch, pr_patch), dim=0)
         label = lcz_patch
-        return source, label
+        return {
+            "image": source,
+            "label": label,
+        }
 
 
     def resize(self):
