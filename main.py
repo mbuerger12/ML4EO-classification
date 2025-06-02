@@ -1,4 +1,3 @@
-import sklearn.ensemble
 from tqdm import tqdm
 import wandb
 from dataset import LCZDataset
@@ -23,8 +22,6 @@ from iterstrat.ml_stratifiers import (
 )
 import torchmetrics
 from torchmetrics.segmentation import DiceScore
-
-
 
 class Trainer:
     def __init__(self, args: argparse.Namespace):
@@ -197,6 +194,26 @@ class Trainer:
         if args.dataset == 'berlin':
             full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
                                   "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None, use_tiled_dataset=True)
+        elif args.dataset == 'athens':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
+
+            full_dataset = LCZDataset(
+                "../dataset/Athens/PRISMA_30.tif",
+                "../dataset/Athens/S2.tif",
+                "../dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None
+            )
+        elif args.dataset == 'milan':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
+            full_dataset = LCZDataset(
+                "../dataset/Milan/PRISMA_30.tif",
+                "../dataset/Milan/S2.tif",
+                "../dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None
+            )
+
         N = len(full_dataset)
         indices = np.arange(N)
         y_multi = np.zeros((N, 17), dtype=int)
@@ -206,6 +223,23 @@ class Trainer:
             np.random.shuffle(indices)
             split = int(0.8 * len(indices))
             train_idx, val_idx = indices[:split], indices[split:]
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Berlin.SEN3" # Corrected path for Berlin's LST data
+
+            full_dataset = LCZDataset(
+                "../dataset/berlin/PRISMA_30.tif",
+                "../dataset/berlin/S2.tif",
+                "../dataset/berlin/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None
+            )
+
+        indices = np.arange(len(full_dataset))
+        np.random.seed(42)  # for reproducibility
+        np.random.shuffle(indices)
+
+        # Define split point
+        split = int(0.8 * len(indices))
+        train_idx, val_idx = indices[:split], indices[split:]
 
         elif args.sampler == "stratified":
             msss = MultilabelStratifiedShuffleSplit(
@@ -248,7 +282,7 @@ class Trainer:
 if __name__ == '__main__':
     print(torch.cuda.is_available())
     print(torch.version.cuda)
-    torch.cuda.empty_cache()  # Clear unused memory in PyTorch's cache
+    torch.cuda.empty_cache()
     args = train_parser.parse_args()
     print(train_parser.format_values())
     trainer = Trainer(args)
@@ -371,6 +405,3 @@ if __name__ == '__main__':
         print(f"Mean IoU      : {mean_iou:.4f}")
         for lbl, p, r, f, iou in zip(present_labels, prec, rec, f1, ious):
             print(f"LCZ {int(lbl):2d} → P {p:.3f}, R {r:.3f}, F1 {f:.3f}, IoU {iou:.3f}")
-
-
-

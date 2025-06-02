@@ -6,23 +6,21 @@ import time
 import matplotlib.pyplot as plt
 import torch
 
-def to_cuda(sample):
-    sampleout = {}
-    for key, val in sample.items():
-        if isinstance(val, torch.Tensor):
-            sampleout[key] = val.cuda()
-        elif isinstance(val, list):
-            new_val = []
-            for e in val:
-                if isinstance(e, torch.Tensor):
-                    new_val.append(e.cuda())
-                else:
-                    new_val.append(val)
-            sampleout[key] = new_val
-        else:
-            sampleout[key] = val
+def to_cuda(sample, device):
+    if isinstance(sample, list):
+        sampleout = []
+        for val in sample:
+            sampleout.append(val.to(device))
+    elif isinstance(sample, dict):
+        sampleout = {}
+        for key, val in sample.items():
+            if isinstance(val, list):
+                sampleout[key] = [v.to(device) for v in val]
+            else:
+                sampleout[key] = val.to(device)
+    else:
+        sampleout = sample.to(device)
     return sampleout
-
 
 def seed_all(seed):
     # Fix all random seeds

@@ -84,29 +84,16 @@ def preprocess_and_save_tiles(prisma_30, s2, lcz_map, patch_size, stride, output
     print(f"Saved {len(tiles)} tiles to {dataset_dir}")
     return dataset_dir
 
+import xarray as xr
+import numpy as np
+import os
 
 class LCZDataset(Dataset):
-    """
-    Dataset for Local Climate Zone (LCZ) classification.
-
-    This dataset can operate in two modes:
-    1. On-the-fly tiling: Images are loaded and tiled during dataset iteration (default)
-    2. Pre-tiled dataset: Images are pre-tiled and saved to disk, then loaded during iteration
-
-    Args:
-        prisma_30 (str): Path to PRISMA-30 hyperspectral image
-        s2 (str): Path to Sentinel-2 multispectral image
-        lcz_map (str): Path to LCZ map (ground truth)
-        patch_size (int): Size of patches
-        stride (int): Stride for tiling
-        transforms (callable, optional): Optional transform to be applied on a sample
-        use_tiled_dataset (bool): Whether to use pre-tiled dataset
-        tiled_dataset_dir (str): Directory where tiled dataset is stored
-    """
-    def __init__(self, prisma_30, s2, lcz_map, patch_size, stride, transforms=None, use_tiled_dataset=False, tiled_dataset_dir="./tiled_dataset"):
+    def __init__(self, prisma_30, s2, lcz_map, lst, patch_size, stride, transforms=None):
         self.prisma_30_path = prisma_30
         self.s2_path = s2
         self.lcz_map_path = lcz_map
+        self.lst_path = lst
         self.tfms = transforms
         self.patch_size = patch_size
         self.stride = stride

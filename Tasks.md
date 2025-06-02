@@ -3,29 +3,18 @@
 All the subtasks for the different sections 
 
 ### Dataset
-- look at different dataset splits
-  - keep inbalance in mind 
-  - work with histograms
-- Implement different dataset splits for comparison
-- look at different modalities
-- People
-  - Joanna
-  - Max
-
-
-
+- add the layer (joanna)
+- improve dataset and implement additional cities (max)
+  
 ### Models
 - Use different models 
-  - CNN
-  - Transformer
-  - Random Forrest
-- People
-  - Shafi 
-  - moez
+  - CNN  (moez)
+  - Random Forest (max?,noe)
 
-### Benchmarking
-- research benchmark options
-- research metrics 
-- people
-  - liang
-  - noe
+
+### Training & Benchmarking
+- run the experiments (max, joanna, liang)
+- evaluation (confusion matrix)
+
+### Presentation
+- prepare plots and results
