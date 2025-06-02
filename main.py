@@ -1,5 +1,5 @@
 from tqdm import tqdm
-import wandb
+#import wandb
 from dataset import LCZDataset
 from torch.utils.data import DataLoader, SubsetRandomSampler
 import torch
@@ -16,25 +16,25 @@ import time
 from arguments import train_parser
 
 
-
-
 class Trainer:
     def __init__(self, args: argparse.Namespace):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.args = args
+        self.device = torch.device("cpu")
+        print("Forcing device to CPU as CUDA is not available or enabled.") 
+        in_chans_for_model = 453#245 
         self.model = smp.Segformer(
-        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
-        encoder_weights="imagenet",  # pretrained weights
-        in_channels=244,  # e.g. 4+10 bands
-        classes=18,  # LCZ classes
-        activation=None  # we'll use raw logits + CrossEntropyLoss
+            encoder_name="mit_b2",
+            encoder_weights="imagenet",
+            in_channels=in_chans_for_model, 
+            classes=18, # Or 17 if that's the correct number of LCZ classes
+            activation=None
         ).to(self.device)
 
+        self.args = args
         self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
                                                                           args)[0]
         self.dataloaders = self.get_dataloaders(args)
-        wandb.init(project=args.wandb_project, dir=self.experiment_folder)
-        wandb.config.update(self.args)
+        #wandb.init(project=args.wandb_project, dir=self.experiment_folder)
+        #wandb.config.update(self.args)
         self.writer = None
         self.batch_size = args.batch_size
         self.num_epochs = args.num_epochs
@@ -50,6 +50,7 @@ class Trainer:
         self.all_preds = []
         self.all_labels = []
 
+
     def __del__(self):
         pass
 
@@ -64,17 +65,6 @@ class Trainer:
 
                 self.scheduler.step()
 
-                """
-                if self.args.save_model in ['last', 'both']:
-                    self.save_model('last')
-
-                if self.args.lr_scheduler == 'step':
-                    self.scheduler.step()
-                    if self.use_wandb:
-                        wandb.log({'log_lr': np.log10(self.scheduler.get_last_lr())}, self.iter)
-                    else:
-                        self.writer.add_scalar('log_lr', np.log10(self.scheduler.get_last_lr()), self.epoch)
-                """
                 self.epoch += 1
 
     def train_epoch(self, tnr=None):
@@ -84,7 +74,7 @@ class Trainer:
             inner_tnr.set_postfix(training_loss=np.nan)
             for i, sample in enumerate(inner_tnr):
                 self.optimizer.zero_grad()
-                sample = to_cuda(sample)
+                sample = to_cuda(sample, self.device) # Pass self.device to the helper function
                 output = self.model(sample['image'])
                 loss = F.cross_entropy(output, sample['label'].long())
                 self.train_stats["loss"] += loss.detach().cpu().item()
@@ -103,7 +93,7 @@ class Trainer:
                                         best_validation_loss=self.best_optimization_loss)
 
 
-                    wandb.log({k + '/train': v for k, v in self.train_stats.items()}, self.iter)
+                    #wandb.log({k + '/train': v for k, v in self.train_stats.items()}, self.iter)
                     # reset metrics
                     self.train_stats = defaultdict(float)
     def validate(self):
@@ -114,7 +104,7 @@ class Trainer:
             inner_tnr.set_postfix(training_loss=np.nan)
             with torch.no_grad():
                 for i, sample in enumerate(inner_tnr):
-                    sample = to_cuda(sample)
+                    sample = to_cuda(sample, self.device)
                     labels = sample['label'].long()
                     output = self.model(sample['image'])
 
@@ -168,76 +158,113 @@ class Trainer:
 
     def get_dataloaders(self, args):
         if args.dataset == 'berlin':
-            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None)
-            indices = np.arange(len(full_dataset))
-            np.random.seed(42)  # for reproducibility
-            np.random.shuffle(indices)
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Berlin.SEN3" # Corrected path for Berlin's LST data
 
-            # Define split point
-            split = int(0.8 * len(indices))
-            train_idx, val_idx = indices[:split], indices[split:]
+            full_dataset = LCZDataset(
+                "../dataset/berlin/PRISMA_30.tif",
+                "../dataset/berlin/S2.tif",
+                "../dataset/berlin/LCZ_MAP.tif",
+                lst_data_folder_path, 
+                64, 32, transforms=None
+            )
+        elif args.dataset == 'athens':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
 
-            # Create samplers
-            train_sampler = SubsetRandomSampler(train_idx)
-            val_sampler = SubsetRandomSampler(val_idx)
+            full_dataset = LCZDataset(
+                "../dataset/Athens/PRISMA_30.tif",
+                "../dataset/Athens/S2.tif",
+                "../dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path, 
+                64, 32, transforms=None
+            )
+        elif args.dataset == 'milan':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
+            full_dataset = LCZDataset(
+                "../dataset/Milan/PRISMA_30.tif",
+                "../dataset/Milan/S2.tif",
+                "../dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path, 
+                64, 32, transforms=None
+            )
+        indices = np.arange(len(full_dataset))
+        np.random.seed(42)  # for reproducibility
+        np.random.shuffle(indices)
 
-            # 3) Create DataLoaders
-            train_loader = DataLoader(
+        # Define split point
+        split = int(0.8 * len(indices))
+        train_idx, val_idx = indices[:split], indices[split:]
+
+        # Create samplers
+        train_sampler = SubsetRandomSampler(train_idx)
+        val_sampler = SubsetRandomSampler(val_idx)
+
+        # 3) Create DataLoaders
+        train_loader = DataLoader(
                 full_dataset,
                 batch_size=8,
                 sampler=train_sampler,
                 num_workers=4,
                 pin_memory=True
-            )
+        )
 
-            val_loader = DataLoader(
+        val_loader = DataLoader(
                 full_dataset,
                 batch_size=8,
                 sampler=val_sampler,
                 num_workers=4,
                 pin_memory=True
-            )
+        )
 
-            return {'train': train_loader, 'val': val_loader}
+        return {'train': train_loader, 'val': val_loader}
+
 
 
 
 if __name__ == '__main__':
     print(torch.cuda.is_available())
     print(torch.version.cuda)
-    torch.cuda.empty_cache()  # Clear unused memory in PyTorch's cache
+    torch.cuda.empty_cache()
+
     args = train_parser.parse_args()
     print(train_parser.format_values())
-    trainer = Trainer(args)
 
+    in_chans = 453 # 245 
+    num_classes = 18 
+    
+    trainer = Trainer(args)
     since = time.time()
     trainer.train()
     time_elapsed = time.time() - since
     print('Training completed in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
 
-
-
-
-    num_epochs = 100
-    in_chans = 244
-    num_classes = 17
-    lr = 0.001
-    w_decay = 0.0001
-
-
     model = smp.Segformer(
-        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
-        encoder_weights="imagenet",  # pretrained weights
-        in_channels=in_chans,  # e.g. 4+10 bands
-        classes=18,  # LCZ classes
-        activation=None  # we'll use raw logits + CrossEntropyLoss
+        encoder_name="mit_b2",
+        encoder_weights="imagenet",
+        in_channels=in_chans,  # Use the updated in_chans
+        classes=num_classes,  # Use the updated num_classes
+        activation=None
     )
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=w_decay)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.01)
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001, total_steps=28 * 40000, pct_start=0.1,
                                                    anneal_strategy='cos', cycle_momentum=False)
-    train_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif","./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif" , 64, 32, transforms=None)
-    val_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif","./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif" , 64, 32, transforms=None)
+
+
+    lst_data_folder_path_main = "./layer/S3B_SL_2_LST____2025060Berlin.SEN3"
+    train_ds = LCZDataset(
+        "./dataset/berlin/PRISMA_30.tif",
+        "./dataset/berlin/S2.tif",
+        "./dataset/berlin/LCZ_MAP.tif",
+        lst_data_folder_path_main, 
+        64, 32, transforms=None
+    )
+    val_ds = LCZDataset(
+        "./dataset/berlin/PRISMA_30.tif",
+        "./dataset/berlin/S2.tif",
+        "./dataset/berlin/LCZ_MAP.tif",
+        lst_data_folder_path_main, 
+        64, 32, transforms=None
+    )
+
 
     # 3) Create DataLoaders
     train_loader = DataLoader(
@@ -329,6 +356,3 @@ if __name__ == '__main__':
         print(f"Mean IoU      : {mean_iou:.4f}")
         for lbl, p, r, f, iou in zip(present_labels, prec, rec, f1, ious):
             print(f"LCZ {int(lbl):2d} → P {p:.3f}, R {r:.3f}, F1 {f:.3f}, IoU {iou:.3f}")
-
-
-
