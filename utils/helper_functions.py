@@ -6,7 +6,7 @@ import time
 import matplotlib.pyplot as plt
 import torch
 
-def to_cuda(sample, device):
+def to_device(sample, device):
     if isinstance(sample, list):
         sampleout = []
         for val in sample:
