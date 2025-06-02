@@ -1,3 +1,4 @@
+import sklearn.ensemble
 from tqdm import tqdm
 import wandb
 from dataset import LCZDataset
@@ -13,8 +14,15 @@ from collections import defaultdict
 import os
 from utils.helper_functions import new_log, to_cuda
 import time
+from torchvision.models.segmentation import fcn_resnet50
 from arguments import train_parser
-
+import torch.nn as nn
+from iterstrat.ml_stratifiers import (
+    MultilabelStratifiedShuffleSplit,
+    MultilabelStratifiedKFold
+)
+import torchmetrics
+from torchmetrics.segmentation import DiceScore
 
 
 
@@ -22,20 +30,60 @@ class Trainer:
     def __init__(self, args: argparse.Namespace):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.args = args
-        self.model = smp.Segformer(
-        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
-        encoder_weights="imagenet",  # pretrained weights
-        in_channels=244,  # e.g. 4+10 bands
-        classes=18,  # LCZ classes
-        activation=None  # we'll use raw logits + CrossEntropyLoss
-        ).to(self.device)
 
+        self.metric_miou = torchmetrics.JaccardIndex(num_classes=18, average='macro', task='multiclass').to(self.device)
+        self.metric_pixelacc = torchmetrics.Accuracy(num_classes= 18, task='multiclass').to(self.device)
+        self.metric_dice = DiceScore(num_classes=18, average='macro').to(self.device)
+
+
+        if args.model == "segformer":
+            self.model = smp.Segformer(
+            encoder_name="mit_b2",
+            encoder_weights="imagenet",
+            in_channels=244,
+            classes=18,
+            activation=None
+            )
+
+        if args.model == "ownCNN":
+            pass
+
+        elif args.model == "resnet50":
+            self.model = fcn_resnet50(pretrained=False, num_classes=18)
+
+            new_conv1 = nn.Conv2d(
+                in_channels=244,
+                out_channels=64,
+                kernel_size=7,
+                stride=2,
+                padding=3,
+                bias=False
+            )
+
+            self.model.backbone.conv1 = new_conv1
+
+        elif args.model == 'UNet':
+            self.model = smp.Unet(
+                encoder_name="resnet34",
+                encoder_weights="imagenet",
+                in_channels=244,
+                classes=18,
+                activation=None
+            )
+
+        self.model = self.model.to(self.device)
         self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
                                                                           args)[0]
         self.dataloaders = self.get_dataloaders(args)
-        wandb.init(project=args.wandb_project, dir=self.experiment_folder)
-        wandb.config.update(self.args)
-        self.writer = None
+        wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            dir=self.experiment_folder,
+            name=f"{args.model}-{args.dataset}-{int(time.time())}",
+            save_code=True,
+            reinit=True
+        )
+        wandb.watch(self.model, log="all", log_freq=args.logstep_train)
         self.batch_size = args.batch_size
         self.num_epochs = args.num_epochs
         self.w_decay = 0.0001
@@ -63,19 +111,9 @@ class Trainer:
                     self.validate()
 
                 self.scheduler.step()
-
-                """
-                if self.args.save_model in ['last', 'both']:
-                    self.save_model('last')
-
-                if self.args.lr_scheduler == 'step':
-                    self.scheduler.step()
-                    if self.use_wandb:
-                        wandb.log({'log_lr': np.log10(self.scheduler.get_last_lr())}, self.iter)
-                    else:
-                        self.writer.add_scalar('log_lr', np.log10(self.scheduler.get_last_lr()), self.epoch)
-                """
                 self.epoch += 1
+
+
 
     def train_epoch(self, tnr=None):
         self.train_stats = defaultdict(float)
@@ -86,7 +124,9 @@ class Trainer:
                 self.optimizer.zero_grad()
                 sample = to_cuda(sample)
                 output = self.model(sample['image'])
-                loss = F.cross_entropy(output, sample['label'].long())
+                if self.args.model == "resnet50":
+                    output = output['out']
+                loss = F.cross_entropy(output, sample['label'].long().to(self.device))
                 self.train_stats["loss"] += loss.detach().cpu().item()
                 loss.backward()
                 self.optimizer.step()
@@ -94,112 +134,114 @@ class Trainer:
                 self.iter += 1
 
                 if (i + 1) % min(self.args.logstep_train, len(self.dataloaders['train'])) == 0:
-                    self.train_stats = {k: v / self.args.logstep_train for k, v in self.train_stats.items()}
+                    avg_loss = self.train_stats["loss"] / self.args.logstep_train
 
-                    inner_tnr.set_postfix(training_loss=self.train_stats['loss'])
+                    inner_tnr.set_postfix(training_loss=avg_loss)
                     if tnr is not None:
-                        tnr.set_postfix(training_loss=self.train_stats['loss'],
-                                        validation_loss=self.val_stats['loss'],
-                                        best_validation_loss=self.best_optimization_loss)
+                        tnr.set_postfix(
+                            training_loss=avg_loss,
+                            validation_loss=self.val_stats.get('loss', np.nan),
+                            best_validation_loss=self.best_optimization_loss
+                        )
 
+                    wandb.log({"train/loss": float(avg_loss)}, step=self.iter)
 
-                    wandb.log({k + '/train': v for k, v in self.train_stats.items()}, self.iter)
-                    # reset metrics
+                    # für die nächste Runde zurücksetzen
                     self.train_stats = defaultdict(float)
+
     def validate(self):
         self.model.eval()
-        self.all_preds = []
-        self.all_labels = []
+        # reset metrics
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
         with tqdm(self.dataloaders['val'], leave=False) as inner_tnr:
-            inner_tnr.set_postfix(training_loss=np.nan)
+            inner_tnr.set_postfix(validation_loss=np.nan)
             with torch.no_grad():
-                for i, sample in enumerate(inner_tnr):
+                for sample in inner_tnr:
                     sample = to_cuda(sample)
-                    labels = sample['label'].long()
+                    labels = sample['label'].long().to(self.device)
                     output = self.model(sample['image'])
+                    if self.args.model == "resnet50":
+                        output = output['out']
+                    preds = output.argmax(1)
 
-                    preds = output.argmax(1)  # [B, H, W]
+                    self.metric_pixelacc.update(preds, labels)
+                    self.metric_miou.update(preds, labels)
+                    self.metric_dice.update(preds, labels)
 
-                    self.all_preds.append(preds.cpu().numpy().ravel())
-                    self.all_labels.append(labels.cpu().numpy().ravel())
-        # flatten your predictions & labels
-        y_pred = np.concatenate(self.all_preds)
-        y_true = np.concatenate(self.all_labels)
+        # extract floats
+        oa   = self.metric_pixelacc.compute().item()
+        miou = self.metric_miou.compute().item()
+        dice = self.metric_dice.compute().item()
 
-        # figure out which labels actually occur in the ground truth
-        present_labels = np.unique(y_true)  # e.g. [0,1,2,5,7,...]
+        # reset for next epoch
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
 
-        # 1) Pixel accuracy
-        acc = accuracy_score(y_true, y_pred)
+        # log to W&B at the current batch‐step (never regress)
+        wandb.log({
+            "val/accuracy": float(oa),
+            "val/mIoU":     float(miou),
+            "val/dice":     float(dice),
+        }, step=self.iter)
 
-        # 2) Per-class Precision / Recall / F1 (only for present_labels)
-        prec, rec, f1, sup = precision_recall_fscore_support(
-            y_true, y_pred,
-            labels=present_labels,
-            zero_division=0  # sets any 0/0 to 0 instead of warning
-        )
 
-        # 3) Per-class IoU
-        ious = jaccard_score(
-            y_true, y_pred,
-            labels=present_labels,
-            average=None,
-            zero_division=0
-        )
 
-        # 4) Mean IoU
-        mean_iou = ious.mean()
-
-        # 5) Optional: a nice text report for present classes
-        print(classification_report(
-            y_true, y_pred,
-            labels=present_labels,
-            target_names=[f"LCZ_{i}" for i in present_labels],
-            zero_division=0
-        ))
-
-        # 6) Print summary
-        print(f"Pixel Accuracy: {acc:.4f}")
-        print(f"Mean IoU      : {mean_iou:.4f}")
-        for lbl, p, r, f, iou in zip(present_labels, prec, rec, f1, ious):
-            print(f"LCZ {int(lbl):2d} → P {p:.3f}, R {r:.3f}, F1 {f:.3f}, IoU {iou:.3f}")
     def save_model(self):
         pass
 
     def get_dataloaders(self, args):
         if args.dataset == 'berlin':
             full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None)
-            indices = np.arange(len(full_dataset))
-            np.random.seed(42)  # for reproducibility
-            np.random.shuffle(indices)
+                                  "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None, use_tiled_dataset=True)
+        N = len(full_dataset)
+        indices = np.arange(N)
+        y_multi = np.zeros((N, 17), dtype=int)
 
-            # Define split point
+        if args.sampler == "random":
+            np.random.seed(42)
+            np.random.shuffle(indices)
             split = int(0.8 * len(indices))
             train_idx, val_idx = indices[:split], indices[split:]
 
-            # Create samplers
-            train_sampler = SubsetRandomSampler(train_idx)
-            val_sampler = SubsetRandomSampler(val_idx)
-
-            # 3) Create DataLoaders
-            train_loader = DataLoader(
-                full_dataset,
-                batch_size=8,
-                sampler=train_sampler,
-                num_workers=4,
-                pin_memory=True
+        elif args.sampler == "stratified":
+            msss = MultilabelStratifiedShuffleSplit(
+                n_splits=1, test_size=0.2, random_state=42
             )
+            train_idx, val_idx = next(msss.split(indices, y_multi))
 
-            val_loader = DataLoader(
-                full_dataset,
-                batch_size=8,
-                sampler=val_sampler,
-                num_workers=4,
-                pin_memory=True
+        elif args.sampler == "skfold":
+            mskf = MultilabelStratifiedKFold(
+                n_splits=4, shuffle=True, random_state=42
             )
+            for fold_idx, (tr, vl) in enumerate(mskf.split(indices, y_multi)):
+                if fold_idx == 3:
+                    train_idx, val_idx = tr, vl
+                    break
 
-            return {'train': train_loader, 'val': val_loader}
+        train_sampler = SubsetRandomSampler(train_idx)
+        val_sampler = SubsetRandomSampler(val_idx)
+
+        train_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        val_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=val_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        return {'train': train_loader, 'val': val_loader}
 
 
 
