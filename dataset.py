@@ -84,12 +84,9 @@ def preprocess_and_save_tiles(prisma_30, s2, lcz_map, patch_size, stride, output
     print(f"Saved {len(tiles)} tiles to {dataset_dir}")
     return dataset_dir
 
-import xarray as xr
-import numpy as np
-import os
 
 class LCZDataset(Dataset):
-    def __init__(self, prisma_30, s2, lcz_map, lst, patch_size, stride, transforms=None):
+    def __init__(self, prisma_30, s2, lcz_map, lst, patch_size, stride, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset" ):
         self.prisma_30_path = prisma_30
         self.s2_path = s2
         self.lcz_map_path = lcz_map
