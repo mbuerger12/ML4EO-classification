@@ -22,6 +22,8 @@ from iterstrat.ml_stratifiers import (
 )
 import torchmetrics
 from torchmetrics.segmentation import DiceScore
+from modelCNN1 import ModelCNN1
+
 
 class Trainer:
     def __init__(self, args: argparse.Namespace):
@@ -43,7 +45,7 @@ class Trainer:
             )
 
         if args.model == "ownCNN":
-            pass
+            self.model = ModelCNN1(in_channels=244, num_classes=18)
 
         elif args.model == "resnet50":
             self.model = fcn_resnet50(pretrained=False, num_classes=18)
