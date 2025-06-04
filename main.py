@@ -73,9 +73,10 @@ class Trainer:
         elif args.model == "randomforest":
             from random_forest_model import RandomForestSegmentation 
             self.model = RandomForestSegmentation(
-                n_estimators=100,
-                max_depth=None,
-                class_weight="balanced"
+                n_estimators=args.rf_n_estimators,
+                max_depth=args.rf_max_depth,
+                class_weight=args.rf_class_weight,
+                random_state=args.rf_random_state
             )
 
         self.model = self.model.to(self.device)
