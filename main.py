@@ -69,6 +69,14 @@ class Trainer:
                 classes=18,
                 activation=None
             )
+            
+        elif args.model == "randomforest":
+            from random_forest_model import RandomForestSegmentation 
+            self.model = RandomForestSegmentation(
+                n_estimators=100,
+                max_depth=None,
+                class_weight="balanced"
+            )
 
         self.model = self.model.to(self.device)
         self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
@@ -101,18 +109,81 @@ class Trainer:
         pass
 
     def train(self):
-        with tqdm(range(self.epoch, self.args.num_epochs), leave=True) as tnr:
-            tnr.set_postfix(training_loss=np.nan, validation_loss=np.nan, best_validation_loss=np.nan)
-            for _ in tnr:
-                self.train_epoch(tnr)
+        if self.args.model == "randomforest":
+            self.train_random_forest()
+            self.test_random_forest()
+            return
+        else:
+            with tqdm(range(self.epoch, self.args.num_epochs), leave=True) as tnr:
+                tnr.set_postfix(training_loss=np.nan, validation_loss=np.nan, best_validation_loss=np.nan)
+                for _ in tnr:
+                    self.train_epoch(tnr)
+    
+                    if (self.epoch + 1) % self.args.val_every_n_epochs == 0:
+                        self.validate()
+    
+                    self.scheduler.step()
+                    self.epoch += 1
+    
+                self.test()
 
-                if (self.epoch + 1) % self.args.val_every_n_epochs == 0:
-                    self.validate()
+    def train_random_forest(self):
+        print("Training Random Forest...")
+        X_all = []
+        y_all = []
+    
+        for sample in tqdm(self.dataloaders['train']): # (B, C, H, W)
+            image = sample['image'].numpy().transpose(0, 2, 3, 1)   # (B, H, W, C)
+            label = sample['label'].numpy()  # (B, H, W)
+            X_all.append(image)
+            y_all.append(label)
+    
+        X_all = np.concatenate(X_all, axis=0)
+        y_all = np.concatenate(y_all, axis=0)
+    
+        self.model.fit(X_all, y_all)
 
-                self.scheduler.step()
-                self.epoch += 1
+    def test_random_forest(self):
+        print("Testing Random Forest...")
+        all_preds, all_labels = [], []
+    
+        # Reset metrics
+        self.metric_miou.reset()
+        self.metric_pixelacc.reset()
+        self.metric_dice.reset()
 
-            self.test()
+        for sample in tqdm(self.dataloaders['test']):
+            image = sample['image'].numpy().transpose(0, 2, 3, 1)  # (B, H, W, C)
+            label = sample['label'].numpy()  # (B, H, W)
+    
+            preds = self.model.predict(image)  # (B, H, W)
+    
+            # Flatten and convert to torch.Tensor
+            pred_tensor = torch.tensor(preds, dtype=torch.int64).to(self.device)
+            label_tensor = torch.tensor(label, dtype=torch.int64).to(self.device)
+    
+            # Update metrics
+            self.metric_miou.update(pred_tensor, label_tensor)
+            self.metric_pixelacc.update(pred_tensor, label_tensor)
+            self.metric_dice.update(pred_tensor, label_tensor)
+    
+        # Compute torchmetrics
+        miou = self.metric_miou.compute().item()
+        pixel_acc = self.metric_pixelacc.compute().item()
+        dice = self.metric_dice.compute().item()
+    
+        # Log to W&B
+        wandb.log({
+            "rf/test/mIoU": miou,
+            "rf/test/pixel_accuracy": pixel_acc,
+            "rf/test/dice": dice,
+        })
+    
+        print("=== Random Forest Test Results ===")
+        print(f"Pixel Accuracy : {pixel_acc:.4f}")
+        print(f"Mean IoU       : {miou:.4f}")
+        print(f"Dice Score     : {dice:.4f}")
+
 
 
     def train_epoch(self, tnr=None):
@@ -149,6 +220,7 @@ class Trainer:
                     # für die nächste Runde zurücksetzen
                     self.train_stats = defaultdict(float)
 
+    
     def validate(self):
         self.model.eval()
         # reset metrics
