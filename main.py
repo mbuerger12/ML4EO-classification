@@ -110,6 +110,7 @@ class Trainer:
                 self.scheduler.step()
                 self.epoch += 1
 
+            self.test()
 
 
     def train_epoch(self, tnr=None):
@@ -185,7 +186,111 @@ class Trainer:
             "val/dice":     float(dice),
         }, step=self.iter)
 
+    def test(self):
+        """
+        Führt eine vollständige Evaluation auf dem Test-Datensatz durch.
+        Berechnet Pixel-Accuracy, mIoU, Dice Score sowie
+        Precision, Recall, F1-Score und Jaccard (IoU) über alle Klassen.
+        Loggt die Ergebnisse in W&B und gibt sie am Ende auf der Konsole aus.
+        """
+        self.model.eval()
+        # TorchMetrics zurücksetzen
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
 
+        all_preds = []
+        all_labels = []
+
+        with tqdm(self.dataloaders['test'], leave=False) as tnr:
+            tnr.set_postfix(test_loss=np.nan)
+            with torch.no_grad():
+                for sample in tnr:
+                    sample = to_cuda(sample, self.device)
+                    images = sample['image']
+                    labels = sample['label'].long().to(self.device)  # [B, H, W]
+
+                    # Vorwärtsdurchlauf
+                    output = self.model(images)
+                    if self.args.model == "resnet50":
+                        output = output['out']
+                    preds = output.argmax(dim=1)  # [B, H, W]
+
+                    # TorchMetrics updaten
+                    self.metric_pixelacc.update(preds, labels)
+                    self.metric_miou.update(preds, labels)
+                    self.metric_dice.update(preds, labels)
+
+                    # Für sklearn: flattenen (Batch, H, W) → (N_pixels,)
+                    all_preds.append(preds.cpu().numpy().reshape(-1))
+                    all_labels.append(labels.cpu().numpy().reshape(-1))
+
+        # TorchMetrics berechnen
+        pixel_acc = self.metric_pixelacc.compute().item()
+        miou      = self.metric_miou.compute().item()
+        dice      = self.metric_dice.compute().item()
+
+        # TorchMetrics zurücksetzen (optional für zukünftige Runs)
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
+        # Arrays zusammenfügen
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_labels = np.concatenate(all_labels, axis=0)
+
+        # sklearn-Metriken berechnen (multi-class)
+        # Hinweis: zero_division=0, damit keine Fehler bei Klassen ohne Vorkommen entstehen.
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average='macro', zero_division=0
+        )
+        # Jaccard-Score (IoU) pro Klasse, dann Durchschnitt
+        jaccard = jaccard_score(
+            all_labels, all_preds, average='macro', zero_division=0
+        )
+        # Gesamt-Accuracy (pixelweise)
+        acc_sklearn = accuracy_score(all_labels, all_preds)
+
+        # Classification Report (Pro-Klasse) – optional zum Ausdrucken
+        class_report = classification_report(
+            all_labels, all_preds, zero_division=0
+        )
+
+        # Ergebnisse in W&B loggen
+        wandb.log({
+            "test/accuracy_pixel": pixel_acc,
+            "test/accuracy_sklearn": acc_sklearn,
+            "test/mIoU_torchmetrics": miou,
+            "test/IoU_sklearn": jaccard,
+            "test/dice": dice,
+            "test/precision": precision,
+            "test/recall": recall,
+            "test/f1": f1
+        }, step=self.iter)
+
+        # Ausgabe auf der Konsole
+        print("=== Test-Ergebnisse ===")
+        print(f"Pixel-Accuracy (TorchMetrics): {pixel_acc:.4f}")
+        print(f"Pixel-Accuracy (sklearn)    : {acc_sklearn:.4f}")
+        print(f"mIoU  (TorchMetrics)        : {miou:.4f}")
+        print(f"IoU   (sklearn)             : {jaccard:.4f}")
+        print(f"Dice-Score (TorchMetrics)   : {dice:.4f}")
+        print(f"Precision (macro)           : {precision:.4f}")
+        print(f"Recall    (macro)           : {recall:.4f}")
+        print(f"F1-Score  (macro)           : {f1:.4f}")
+        print("\nClassification Report (pro Klasse):")
+        print(class_report)
+
+        return {
+            "pixel_acc_torch": pixel_acc,
+            "pixel_acc_sklearn": acc_sklearn,
+            "mIoU_torch": miou,
+            "IoU_sklearn": jaccard,
+            "dice": dice,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
 
     def save_model(self):
         pass
@@ -198,40 +303,70 @@ class Trainer:
             lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
 
             full_dataset = LCZDataset(
-                "../dataset/Athens/PRISMA_30.tif",
-                "../dataset/Athens/S2.tif",
-                "../dataset/Athens/LCZ_MAP.tif",
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
             )
         elif args.dataset == 'milan':
             lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
             full_dataset = LCZDataset(
-                "../dataset/Milan/PRISMA_30.tif",
-                "../dataset/Milan/S2.tif",
-                "../dataset/Milan/LCZ_MAP.tif",
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
             )
 
-        N = len(full_dataset)
-        indices = np.arange(N)
-        y_multi = np.zeros((N, 17), dtype=int)
+        elif args.dataset == "full":
+
+            experiment_setup = ["berlin", "athens", "milan"]
+
+            lst_data_folder_path = "./"
+            berlin_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif",
+                                        "./dataset/berlin/S2.tif",
+                                    "./dataset/berlin/LCZ_MAP.tif",
+                                        "./", 64,
+                                        32,
+                                        transforms=None,
+                                        use_tiled_dataset=True,
+                                        tiled_dataset_dir="./tiled_dataset")
+            athens_dataset = LCZDataset(
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+            milan_dataset = LCZDataset(
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+
+
+        if args.dataset == "full":
+            full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
+            test_dataset = milan_dataset
+            test_idx = np.arange(len(test_dataset))
+            indices = np.arange(len(full_dataset))
+            N = len(full_dataset)
+            y_multi = np.zeros((N, 17), dtype=int)
+        else:
+            N = len(full_dataset)
+            indices = np.arange(N)
+            y_multi = np.zeros((N, 17), dtype=int)
 
         if args.sampler == "random":
             np.random.seed(42)
             np.random.shuffle(indices)
             split = int(0.8 * len(indices))
             train_idx, val_idx = indices[:split], indices[split:]
-            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Berlin.SEN3" # Corrected path for Berlin's LST data
+            test_idx = indices
 
-            full_dataset = LCZDataset(
-                "../dataset/berlin/PRISMA_30.tif",
-                "../dataset/berlin/S2.tif",
-                "../dataset/berlin/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None
-            )
         elif args.sampler == "stratified":
             msss = MultilabelStratifiedShuffleSplit(
                 n_splits=1, test_size=0.2, random_state=42
@@ -246,18 +381,14 @@ class Trainer:
                 if fold_idx == 3:
                     train_idx, val_idx = tr, vl
                     break
-        indices = np.arange(len(full_dataset))
-        np.random.seed(42)  # for reproducibility
-        np.random.shuffle(indices)
 
-        # Define split point
-        split = int(0.8 * len(indices))
-        train_idx, val_idx = indices[:split], indices[split:]
 
 
 
         train_sampler = SubsetRandomSampler(train_idx)
         val_sampler = SubsetRandomSampler(val_idx)
+        test_sampler = SubsetRandomSampler(test_idx)
+
 
         train_loader = DataLoader(
             full_dataset,
@@ -274,7 +405,16 @@ class Trainer:
             num_workers=4,
             pin_memory=True
         )
-        return {'train': train_loader, 'val': val_loader}
+
+        test_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            num_workers=4,
+            sampler=test_sampler,
+            pin_memory=True
+        )
+
+        return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
 
 

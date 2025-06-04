@@ -38,8 +38,8 @@ def preprocess_and_save_tiles(prisma_30, s2, lcz_map, patch_size, stride, output
 
     # Load images
     prisma_image = tifffile.imread(prisma_30)
-    s2_image = tifffile.imread(s2)
     lcz_image = tifffile.imread(lcz_map)
+    s2_image = tifffile.imread(s2)
 
     # Crop and resize
     crop_left = 1
