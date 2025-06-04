@@ -2,11 +2,12 @@ from sklearn.ensemble import RandomForestClassifier
 import numpy as np
 
 class RandomForestSegmentation:
-    def __init__(self, n_estimators=100, max_depth=None, class_weight='balanced'):
+    def __init__(self, n_estimators=100, max_depth=None, class_weight='balanced', random_state=42):
         self.model = RandomForestClassifier(
             n_estimators=n_estimators,
             max_depth=max_depth,
-            class_weight=class_weight
+            class_weight=class_weight,
+            random_state=random_state
         )
 
     def fit(self, X, y):
