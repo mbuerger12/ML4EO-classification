@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import segmentation_models_pytorch as smp
 from torch import optim
 import numpy as np
-from sklearn.metrics import accuracy_score,precision_recall_fscore_support,  jaccard_score, classification_report
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, jaccard_score, classification_report, confusion_matrix
 import argparse
 from collections import defaultdict
 import os
@@ -22,6 +22,7 @@ from iterstrat.ml_stratifiers import (
 )
 import torchmetrics
 from torchmetrics.segmentation import DiceScore
+import matplotlib.pyplot as plt
 
 class Trainer:
     def __init__(self, args: argparse.Namespace):
@@ -154,6 +155,9 @@ class Trainer:
         self.metric_miou.reset()
         self.metric_dice.reset()
 
+        all_preds = []
+        all_labels = []
+
         with tqdm(self.dataloaders['val'], leave=False) as inner_tnr:
             inner_tnr.set_postfix(validation_loss=np.nan)
             with torch.no_grad():
@@ -169,6 +173,10 @@ class Trainer:
                     self.metric_miou.update(preds, labels)
                     self.metric_dice.update(preds, labels)
 
+                    # Collect predictions and labels for confusion matrix
+                    all_preds.append(preds.cpu().numpy().reshape(-1))
+                    all_labels.append(labels.cpu().numpy().reshape(-1))
+
         # extract floats
         oa   = self.metric_pixelacc.compute().item()
         miou = self.metric_miou.compute().item()
@@ -179,12 +187,58 @@ class Trainer:
         self.metric_miou.reset()
         self.metric_dice.reset()
 
-        # log to W&B at the current batch‐step (never regress)
+        # Calculate confusion matrix
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_labels = np.concatenate(all_labels, axis=0)
+        conf_matrix = confusion_matrix(all_labels, all_preds, labels=range(18))
+
+        # Normalize the confusion matrix
+        conf_matrix_norm = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix_norm = np.nan_to_num(conf_matrix_norm)  # Replace NaN with 0
+
+        # Create a wandb Image with the confusion matrix
+        fig, ax = plt.subplots(figsize=(12, 10))
+        im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
+        ax.set_title('Validation Confusion Matrix (Normalized)')
+        plt.colorbar(im)
+
+        # Set ticks and labels
+        classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
+        tick_marks = np.arange(len(classes))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels(classes, rotation=45, ha="right")
+        ax.set_yticklabels(classes)
+
+        # Add text annotations
+        thresh = conf_matrix_norm.max() / 2.
+        for i in range(conf_matrix_norm.shape[0]):
+            for j in range(conf_matrix_norm.shape[1]):
+                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
+                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                            ha="center", va="center", 
+                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
+                            fontsize=8)
+
+        ax.set_xlabel('Predicted Label')
+        ax.set_ylabel('True Label')
+        plt.tight_layout()
+
+        # Also log the raw confusion matrix as a table
+        wandb.log({"val/confusion_matrix_table": wandb.Table(
+            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
+            columns=["True", "Predicted", "Count"]
+        )}, step=self.iter)
+
+        # Log to W&B at the current batch‐step
         wandb.log({
             "val/accuracy": float(oa),
             "val/mIoU":     float(miou),
             "val/dice":     float(dice),
+            "val/confusion_matrix": wandb.Image(fig)
         }, step=self.iter)
+
+        plt.close(fig)
 
     def test(self):
         """
@@ -256,6 +310,47 @@ class Trainer:
             all_labels, all_preds, zero_division=0
         )
 
+        # Calculate confusion matrix
+        conf_matrix = confusion_matrix(all_labels, all_preds, labels=range(18))
+
+        # Normalize the confusion matrix
+        conf_matrix_norm = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix_norm = np.nan_to_num(conf_matrix_norm)  # Replace NaN with 0
+
+        # Create a wandb Image with the confusion matrix
+        fig, ax = plt.subplots(figsize=(12, 10))
+        im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
+        ax.set_title('Test Confusion Matrix (Normalized)')
+        plt.colorbar(im)
+
+        # Set ticks and labels
+        classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
+        tick_marks = np.arange(len(classes))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels(classes, rotation=45, ha="right")
+        ax.set_yticklabels(classes)
+
+        # Add text annotations
+        thresh = conf_matrix_norm.max() / 2.
+        for i in range(conf_matrix_norm.shape[0]):
+            for j in range(conf_matrix_norm.shape[1]):
+                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
+                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                            ha="center", va="center", 
+                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
+                            fontsize=8)
+
+        ax.set_xlabel('Predicted Label')
+        ax.set_ylabel('True Label')
+        plt.tight_layout()
+
+        # Also log the raw confusion matrix as a table
+        wandb.log({"test/confusion_matrix_table": wandb.Table(
+            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
+            columns=["True", "Predicted", "Count"]
+        )}, step=self.iter)
+
         # Ergebnisse in W&B loggen
         wandb.log({
             "test/accuracy_pixel": pixel_acc,
@@ -265,8 +360,11 @@ class Trainer:
             "test/dice": dice,
             "test/precision": precision,
             "test/recall": recall,
-            "test/f1": f1
+            "test/f1": f1,
+            "test/confusion_matrix": wandb.Image(fig)
         }, step=self.iter)
+
+        plt.close(fig)
 
         # Ausgabe auf der Konsole
         print("=== Test-Ergebnisse ===")
