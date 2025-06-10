@@ -1,5 +1,5 @@
 from tqdm import tqdm
-#import wandb
+import wandb
 from dataset import LCZDataset
 from torch.utils.data import DataLoader, SubsetRandomSampler
 import torch
@@ -15,24 +15,84 @@ from utils.helper_functions import new_log, to_cuda
 import time
 from torchvision.models.segmentation import fcn_resnet50
 from arguments import train_parser
+import torch.nn as nn
+from iterstrat.ml_stratifiers import (
+    MultilabelStratifiedShuffleSplit,
+    MultilabelStratifiedKFold
+)
+import torchmetrics
+from torchmetrics.segmentation import DiceScore
+import matplotlib.pyplot as plt
+from modelCNN1 import ModelCNN1
+
 
 class Trainer:
     def __init__(self, args: argparse.Namespace):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.args = args
-        self.model = smp.Segformer(
-        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
-        encoder_weights="imagenet",  # pretrained weights
-        in_channels=244,  # e.g. 4+10 bands
-        classes=18,  # LCZ classes
-        activation=None  # we'll use raw logits + CrossEntropyLoss
-        )
 
+        self.metric_miou = torchmetrics.JaccardIndex(num_classes=18, average='macro', task='multiclass').to(self.device)
+        self.metric_pixelacc = torchmetrics.Accuracy(num_classes= 18, task='multiclass').to(self.device)
+        self.metric_dice = DiceScore(num_classes=18, average='macro').to(self.device)
+
+
+        if args.model == "segformer":
+            self.model = smp.Segformer(
+            encoder_name="mit_b2",
+            encoder_weights="imagenet",
+            in_channels=244,
+            classes=18,
+            activation=None
+            )
+
+        if args.model == "ownCNN":
+            self.model = ModelCNN1(in_channels=244, num_classes=18)
+
+        elif args.model == "resnet50":
+            self.model = fcn_resnet50(pretrained=False, num_classes=18)
+
+            new_conv1 = nn.Conv2d(
+                in_channels=244,
+                out_channels=64,
+                kernel_size=7,
+                stride=2,
+                padding=3,
+                bias=False
+            )
+
+            self.model.backbone.conv1 = new_conv1
+
+        elif args.model == 'UNet':
+            self.model = smp.Unet(
+                encoder_name="resnet34",
+                encoder_weights="imagenet",
+                in_channels=244,
+                classes=18,
+                activation=None
+            )
+
+        elif args.model == "randomforest":
+            from random_forest_model import RandomForestSegmentation
+            self.model = RandomForestSegmentation(
+                n_estimators=args.rf_n_estimators,
+                max_depth=args.rf_max_depth,
+                class_weight=args.rf_class_weight,
+                random_state=args.rf_random_state
+            )
+
+        self.model = self.model.to(self.device)
         self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
                                                                           args)[0]
         self.dataloaders = self.get_dataloaders(args)
-        wandb.init(project=args.wandb_project, dir=self.experiment_folder)
-        wandb.config.update(self.args)
-        self.writer = None
+        wandb.init(
+            project=args.wandb_project,
+            config=vars(args),
+            dir=self.experiment_folder,
+            name=f"{args.model}-{args.dataset}-{int(time.time())}",
+            save_code=True,
+            reinit=True
+        )
+        wandb.watch(self.model, log="all", log_freq=args.logstep_train)
         self.batch_size = args.batch_size
         self.num_epochs = args.num_epochs
         self.w_decay = 0.0001
@@ -44,6 +104,8 @@ class Trainer:
         self.train_stats = defaultdict(lambda: np.nan)
         self.val_stats = defaultdict(lambda: np.nan)
         self.best_optimization_loss = np.inf
+        self.all_preds = []
+        self.all_labels = []
 
     def __del__(self):
         pass
@@ -62,17 +124,8 @@ class Trainer:
                     if (self.epoch + 1) % self.args.val_every_n_epochs == 0:
                         self.validate()
 
-                    if self.args.save_model in ['last', 'both']:
-                        self.save_model('last')
-
-                if self.args.lr_scheduler == 'step':
                     self.scheduler.step()
-                    if self.use_wandb:
-                        wandb.log({'log_lr': np.log10(self.scheduler.get_last_lr())}, self.iter)
-                    else:
-                        self.writer.add_scalar('log_lr', np.log10(self.scheduler.get_last_lr()), self.epoch)
-
-                self.epoch += 1
+                    self.epoch += 1
 
                 self.test()
 
@@ -142,66 +195,505 @@ class Trainer:
             inner_tnr.set_postfix(training_loss=np.nan)
             for i, sample in enumerate(inner_tnr):
                 self.optimizer.zero_grad()
-                sample = to_cuda(sample)
+                sample = to_cuda(sample, device=self.device)
                 output = self.model(sample['image'])
                 if self.args.model == "resnet50":
                     output = output['out']
                 loss = F.cross_entropy(output, sample['label'].long().to(self.device))
                 self.train_stats["loss"] += loss.detach().cpu().item()
                 loss.backward()
-                optimizer.step()
-                scheduler.step()
+                self.optimizer.step()
+                self.scheduler.step()
                 self.iter += 1
 
-                if (i + 1) % min(self.args.logstep_train, len(self.dataloaders.datasets['train'])) == 0:
-                    self.train_stats = {k: v / self.args.logstep_train for k, v in self.train_stats.items()}
+                if (i + 1) % min(self.args.logstep_train, len(self.dataloaders['train'])) == 0:
+                    avg_loss = self.train_stats["loss"] / self.args.logstep_train
 
                     inner_tnr.set_postfix(training_loss=avg_loss)
                     if tnr is not None:
-                        tnr.set_postfix(training_loss=self.train_stats['loss'],
-                                        validation_loss=self.val_stats['loss'],
-                                        best_validation_loss=self.best_optimization_loss)
+                        tnr.set_postfix(
+                            training_loss=avg_loss,
+                            validation_loss=self.val_stats.get('loss', np.nan),
+                            best_validation_loss=self.best_optimization_loss
+                        )
 
-                    if self.use_wandb:
-                        wandb.log({k + '/train': v for k, v in self.train_stats.items()}, self.iter)
-                    else:
-                        for key in self.train_stats:
-                            self.writer.add_scalar('train/' + key, self.train_stats[key], self.iter)
+                    wandb.log({"train/loss": float(avg_loss)}, step=self.iter)
 
-                    # reset metrics
+                    # für die nächste Runde zurücksetzen
                     self.train_stats = defaultdict(float)
 
     def validate(self):
-        pass
+        self.model.eval()
+        # reset metrics
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
+        all_preds = []
+        all_labels = []
+
+        with tqdm(self.dataloaders['val'], leave=False) as inner_tnr:
+            inner_tnr.set_postfix(validation_loss=np.nan)
+            with torch.no_grad():
+                for sample in inner_tnr:
+                    sample = to_cuda(sample, self.device)
+                    labels = sample['label'].long().to(self.device)
+                    output = self.model(sample['image'])
+                    if self.args.model == "resnet50":
+                        output = output['out']
+                    preds = output.argmax(1)
+
+                    self.metric_pixelacc.update(preds, labels)
+                    self.metric_miou.update(preds, labels)
+                    self.metric_dice.update(preds, labels)
+
+                    # Collect predictions and labels for confusion matrix
+                    all_preds.append(preds.cpu().numpy().reshape(-1))
+                    all_labels.append(labels.cpu().numpy().reshape(-1))
+
+        # extract floats
+        oa   = self.metric_pixelacc.compute().item()
+        miou = self.metric_miou.compute().item()
+        dice = self.metric_dice.compute().item()
+
+        # reset for next epoch
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
+        # Calculate confusion matrix
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_labels = np.concatenate(all_labels, axis=0)
+        conf_matrix = confusion_matrix(all_labels, all_preds, labels=range(18))
+
+        # Normalize the confusion matrix
+        conf_matrix_norm = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix_norm = np.nan_to_num(conf_matrix_norm)  # Replace NaN with 0
+
+        # Create a wandb Image with the confusion matrix
+        fig, ax = plt.subplots(figsize=(12, 10))
+        im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
+        ax.set_title('Validation Confusion Matrix (Normalized)')
+        plt.colorbar(im)
+
+        # Set ticks and labels
+        classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
+        tick_marks = np.arange(len(classes))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels(classes, rotation=45, ha="right")
+        ax.set_yticklabels(classes)
+
+        # Add text annotations
+        thresh = conf_matrix_norm.max() / 2.
+        for i in range(conf_matrix_norm.shape[0]):
+            for j in range(conf_matrix_norm.shape[1]):
+                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
+                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                            ha="center", va="center",
+                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
+                            fontsize=8)
+
+        ax.set_xlabel('Predicted Label')
+        ax.set_ylabel('True Label')
+        plt.tight_layout()
+
+        # Also log the raw confusion matrix as a table
+        wandb.log({"val/confusion_matrix_table": wandb.Table(
+            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
+            columns=["True", "Predicted", "Count"]
+        )}, step=self.iter)
+
+        # Log to W&B at the current batch‐step
+        wandb.log({
+            "val/accuracy": float(oa),
+            "val/mIoU":     float(miou),
+            "val/dice":     float(dice),
+            "val/confusion_matrix": wandb.Image(fig)
+        }, step=self.iter)
+
+        plt.close(fig)
+
+    def test(self):
+        """
+        Führt eine vollständige Evaluation auf dem Test-Datensatz durch.
+        Berechnet Pixel-Accuracy, mIoU, Dice Score sowie
+        Precision, Recall, F1-Score und Jaccard (IoU) über alle Klassen.
+        Loggt die Ergebnisse in W&B und gibt sie am Ende auf der Konsole aus.
+        """
+        self.model.eval()
+        # TorchMetrics zurücksetzen
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
+        all_preds = []
+        all_labels = []
+
+        with tqdm(self.dataloaders['test'], leave=False) as tnr:
+            tnr.set_postfix(test_loss=np.nan)
+            with torch.no_grad():
+                for sample in tnr:
+                    sample = to_cuda(sample, self.device)
+                    images = sample['image']
+                    labels = sample['label'].long().to(self.device)  # [B, H, W]
+
+                    # Vorwärtsdurchlauf
+                    output = self.model(images)
+                    if self.args.model == "resnet50":
+                        output = output['out']
+                    preds = output.argmax(dim=1)  # [B, H, W]
+
+                    # TorchMetrics updaten
+                    self.metric_pixelacc.update(preds, labels)
+                    self.metric_miou.update(preds, labels)
+                    self.metric_dice.update(preds, labels)
+
+                    # Für sklearn: flattenen (Batch, H, W) → (N_pixels,)
+                    all_preds.append(preds.cpu().numpy().reshape(-1))
+                    all_labels.append(labels.cpu().numpy().reshape(-1))
+
+        # TorchMetrics berechnen
+        pixel_acc = self.metric_pixelacc.compute().item()
+        miou      = self.metric_miou.compute().item()
+        dice      = self.metric_dice.compute().item()
+
+        # TorchMetrics zurücksetzen (optional für zukünftige Runs)
+        self.metric_pixelacc.reset()
+        self.metric_miou.reset()
+        self.metric_dice.reset()
+
+        # Arrays zusammenfügen
+        all_preds = np.concatenate(all_preds, axis=0)
+        all_labels = np.concatenate(all_labels, axis=0)
+
+        # sklearn-Metriken berechnen (multi-class)
+        # Hinweis: zero_division=0, damit keine Fehler bei Klassen ohne Vorkommen entstehen.
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average='macro', zero_division=0
+        )
+        # Jaccard-Score (IoU) pro Klasse, dann Durchschnitt
+        jaccard = jaccard_score(
+            all_labels, all_preds, average='macro', zero_division=0
+        )
+        # Gesamt-Accuracy (pixelweise)
+        acc_sklearn = accuracy_score(all_labels, all_preds)
+
+        # Classification Report (Pro-Klasse) – optional zum Ausdrucken
+        class_report = classification_report(
+            all_labels, all_preds, zero_division=0
+        )
+
+        # Calculate confusion matrix
+        conf_matrix = confusion_matrix(all_labels, all_preds, labels=range(18))
+
+        # Normalize the confusion matrix
+        conf_matrix_norm = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix_norm = np.nan_to_num(conf_matrix_norm)  # Replace NaN with 0
+
+        # Create a wandb Image with the confusion matrix
+        fig, ax = plt.subplots(figsize=(12, 10))
+        im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
+        ax.set_title('Test Confusion Matrix (Normalized)')
+        plt.colorbar(im)
+
+        # Set ticks and labels
+        classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
+        tick_marks = np.arange(len(classes))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels(classes, rotation=45, ha="right")
+        ax.set_yticklabels(classes)
+
+        # Add text annotations
+        thresh = conf_matrix_norm.max() / 2.
+        for i in range(conf_matrix_norm.shape[0]):
+            for j in range(conf_matrix_norm.shape[1]):
+                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
+                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                            ha="center", va="center",
+                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
+                            fontsize=8)
+
+        ax.set_xlabel('Predicted Label')
+        ax.set_ylabel('True Label')
+        plt.tight_layout()
+
+        # Also log the raw confusion matrix as a table
+        wandb.log({"test/confusion_matrix_table": wandb.Table(
+            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
+            columns=["True", "Predicted", "Count"]
+        )}, step=self.iter)
+
+        # Ergebnisse in W&B loggen
+        wandb.log({
+            "test/accuracy_pixel": pixel_acc,
+            "test/accuracy_sklearn": acc_sklearn,
+            "test/mIoU_torchmetrics": miou,
+            "test/IoU_sklearn": jaccard,
+            "test/dice": dice,
+            "test/precision": precision,
+            "test/recall": recall,
+            "test/f1": f1,
+            "test/confusion_matrix": wandb.Image(fig)
+        }, step=self.iter)
+
+        plt.close(fig)
+
+        # Ausgabe auf der Konsole
+        print("=== Test-Ergebnisse ===")
+        print(f"Pixel-Accuracy (TorchMetrics): {pixel_acc:.4f}")
+        print(f"Pixel-Accuracy (sklearn)    : {acc_sklearn:.4f}")
+        print(f"mIoU  (TorchMetrics)        : {miou:.4f}")
+        print(f"IoU   (sklearn)             : {jaccard:.4f}")
+        print(f"Dice-Score (TorchMetrics)   : {dice:.4f}")
+        print(f"Precision (macro)           : {precision:.4f}")
+        print(f"Recall    (macro)           : {recall:.4f}")
+        print(f"F1-Score  (macro)           : {f1:.4f}")
+        print("\nClassification Report (pro Klasse):")
+        print(class_report)
+
+        return {
+            "pixel_acc_torch": pixel_acc,
+            "pixel_acc_sklearn": acc_sklearn,
+            "mIoU_torch": miou,
+            "IoU_sklearn": jaccard,
+            "dice": dice,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+        }
 
     def save_model(self):
         pass
 
+    def get_dataloaders_max(self, args):
+        if args.dataset == 'berlin':
+            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
+                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
+        elif args.dataset == 'athens':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
+
+            full_dataset = LCZDataset(
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+        elif args.dataset == 'milan':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
+            full_dataset = LCZDataset(
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+        elif args.dataset == "full":
+
+            experiment_setup = ["berlin", "athens", "milan"]
+
+            lst_data_folder_path = "./"
+            berlin_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif",
+                                        "./dataset/berlin/S2.tif",
+                                    "./dataset/berlin/LCZ_MAP.tif",
+                                        "./", 64,
+                                        32,
+                                        transforms=None,
+                                        use_tiled_dataset=True,
+                                        tiled_dataset_dir="./tiled_dataset")
+            athens_dataset = LCZDataset(
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+            milan_dataset = LCZDataset(
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+        if args.dataset == "full":
+            full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
+            test_dataset = milan_dataset
+            test_idx = np.arange(len(test_dataset))
+            indices = np.arange(len(full_dataset))
+            N = len(full_dataset)
+            y_multi = np.zeros((N, 17), dtype=int)
+        else:
+            N = len(full_dataset)
+            indices = np.arange(N)
+            y_multi = np.zeros((N, 17), dtype=int)
+
+        if args.sampler == "random":
+            np.random.seed(42)
+            np.random.shuffle(indices)
+            split = int(0.8 * len(indices))
+            train_idx, val_idx = indices[:split], indices[split:]
+            test_idx = indices
+
+        elif args.sampler == "stratified":
+            msss = MultilabelStratifiedShuffleSplit(
+                n_splits=1, test_size=0.2, random_state=42
+            )
+            train_idx, val_idx = next(msss.split(indices, y_multi))
+
+        elif args.sampler == "skfold":
+            mskf = MultilabelStratifiedKFold(
+                n_splits=4, shuffle=True, random_state=42
+            )
+            for fold_idx, (tr, vl) in enumerate(mskf.split(indices, y_multi)):
+                if fold_idx == 3:
+                    train_idx, val_idx = tr, vl
+                    break
+        train_sampler = SubsetRandomSampler(train_idx)
+        val_sampler = SubsetRandomSampler(val_idx)
+        test_sampler = SubsetRandomSampler(test_idx)
+        train_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True)
+        val_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=val_sampler,
+            num_workers=4,
+            pin_memory=True)
+        test_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            num_workers=4,
+            sampler=test_sampler,
+            pin_memory=True
+        )
+        return {'train': train_loader, 'val': val_loader, 'test': test_loader}
+
     def get_dataloaders(self, args):
         if args.dataset == 'berlin':
-            train_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", 64, 32, transforms=None)
-            val_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif",
-                                64, 32, transforms=None)
+            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
+                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
+        elif args.dataset == 'athens':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
 
-            # 3) Create DataLoaders
-            train_loader = DataLoader(
-                train_ds,
-                batch_size=8,
-                shuffle=True,
-                num_workers=4,
-                pin_memory=True
+            full_dataset = LCZDataset(
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+        elif args.dataset == 'milan':
+            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
+            full_dataset = LCZDataset(
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
             )
 
-            val_loader = DataLoader(
-                val_ds,
-                batch_size=8,
-                shuffle=False,
-                num_workers=4,
-                pin_memory=True
+        elif args.dataset == "full":
+
+            experiment_setup = ["berlin", "athens", "milan"]
+
+            lst_data_folder_path = "./"
+            berlin_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif",
+                                        "./dataset/berlin/S2.tif",
+                                    "./dataset/berlin/LCZ_MAP.tif",
+                                        "./", 64,
+                                        32,
+                                        transforms=None,
+                                        use_tiled_dataset=True,
+                                        tiled_dataset_dir="./tiled_dataset")
+            athens_dataset = LCZDataset(
+                "./dataset/Athens/PRISMA_30.tif",
+                "./dataset/Athens/S2.tif",
+                "./dataset/Athens/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+            )
+            milan_dataset = LCZDataset(
+                "./dataset/Milan/PRISMA_30.tif",
+                "./dataset/Milan/S2.tif",
+                "./dataset/Milan/LCZ_MAP.tif",
+                lst_data_folder_path,
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
             )
 
-            return {'train': train_loader, 'val': val_loader}
+
+        if args.dataset == "full":
+            full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
+            test_dataset = milan_dataset
+            test_idx = np.arange(len(test_dataset))
+            indices = np.arange(len(full_dataset))
+            N = len(full_dataset)
+            y_multi = np.zeros((N, 17), dtype=int)
+        else:
+            N = len(full_dataset)
+            indices = np.arange(N)
+            y_multi = np.zeros((N, 17), dtype=int)
+
+        if args.sampler == "random":
+            np.random.seed(42)
+            np.random.shuffle(indices)
+            split = int(0.8 * len(indices))
+            train_idx, val_idx = indices[:split], indices[split:]
+            test_idx = indices
+
+        elif args.sampler == "stratified":
+            msss = MultilabelStratifiedShuffleSplit(
+                n_splits=1, test_size=0.2, random_state=42
+            )
+            train_idx, val_idx = next(msss.split(indices, y_multi))
+
+        elif args.sampler == "skfold":
+            mskf = MultilabelStratifiedKFold(
+                n_splits=4, shuffle=True, random_state=42
+            )
+            for fold_idx, (tr, vl) in enumerate(mskf.split(indices, y_multi)):
+                if fold_idx == 3:
+                    train_idx, val_idx = tr, vl
+                    break
+
+
+
+
+        train_sampler = SubsetRandomSampler(train_idx)
+        val_sampler = SubsetRandomSampler(val_idx)
+        test_sampler = SubsetRandomSampler(test_idx)
+
+
+        train_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=train_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        val_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            sampler=val_sampler,
+            num_workers=4,
+            pin_memory=True
+        )
+
+        test_loader = DataLoader(
+            full_dataset,
+            batch_size=8,
+            num_workers=4,
+            sampler=test_sampler,
+            pin_memory=True
+        )
+
+        return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
 
 
@@ -209,7 +701,7 @@ class Trainer:
 if __name__ == '__main__':
     print(torch.cuda.is_available())
     print(torch.version.cuda)
-    torch.cuda.empty_cache()  # Clear unused memory in PyTorch's cache
+    torch.cuda.empty_cache()
     args = train_parser.parse_args()
     print(train_parser.format_values())
 
@@ -221,120 +713,3 @@ if __name__ == '__main__':
     trainer.train()
     time_elapsed = time.time() - since
     print('Training completed in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-
-
-
-
-    num_epochs = 100
-    in_chans = 244
-    num_classes = 17
-    lr = 0.001
-    w_decay = 0.0001
-
-
-    model = smp.Segformer(
-        encoder_name="mit_b2",  # backbone size: b0, b1, b2, etc.
-        encoder_weights="imagenet",  # pretrained weights
-        in_channels=in_chans,  # e.g. 4+10 bands
-        classes=18,  # LCZ classes
-        activation=None  # we'll use raw logits + CrossEntropyLoss
-    )
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=w_decay)
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001, total_steps=28 * 40000, pct_start=0.1,
-                                                   anneal_strategy='cos', cycle_momentum=False)
-    train_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif","./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif" , 64, 32, transforms=None)
-    val_ds = LCZDataset("./dataset/berlin/PRISMA_30.tif","./dataset/berlin/S2.tif", "./dataset/berlin/LCZ_MAP.tif" , 64, 32, transforms=None)
-
-    # 3) Create DataLoaders
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=8,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=8,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    print(device)
-    for epoch in range(num_epochs):
-        print(epoch)
-        model.train()
-        for x, l in train_loader:
-            x = x.to(device)  # [B, C_pr, 256,256]
-            label = l.to(device)  # [B, 256,256]
-            optimizer.zero_grad()
-            output = model(x)
-            loss = F.cross_entropy(output, label.long())
-            print(loss)
-            loss.backward()
-            print("finished backward")
-            optimizer.step()
-            scheduler.step()
-
-        model.eval()
-        all_preds = []
-        all_labels = []
-
-        with torch.no_grad():
-            for x, l in val_loader:
-                x = x.to(device)
-                labels = l.to(device)
-                logits = model(x)  # [B, 17, H, W]
-                preds = logits.argmax(1)  # [B, H, W]
-
-                all_preds.append(preds.cpu().numpy().ravel())
-                all_labels.append(labels.cpu().numpy().ravel())
-
-        # flatten your predictions & labels
-        y_pred = np.concatenate(all_preds)
-        y_true = np.concatenate(all_labels)
-
-        # figure out which labels actually occur in the ground truth
-        present_labels = np.unique(y_true)  # e.g. [0,1,2,5,7,...]
-
-        # 1) Pixel accuracy
-        acc = accuracy_score(y_true, y_pred)
-
-        # 2) Per-class Precision / Recall / F1 (only for present_labels)
-        prec, rec, f1, sup = precision_recall_fscore_support(
-            y_true, y_pred,
-            labels=present_labels,
-            zero_division=0  # sets any 0/0 to 0 instead of warning
-        )
-
-        # 3) Per-class IoU
-        ious = jaccard_score(
-            y_true, y_pred,
-            labels=present_labels,
-            average=None,
-            zero_division=0
-        )
-
-        # 4) Mean IoU
-        mean_iou = ious.mean()
-
-        # 5) Optional: a nice text report for present classes
-        print(classification_report(
-            y_true, y_pred,
-            labels=present_labels,
-            target_names=[f"LCZ_{i}" for i in present_labels],
-            zero_division=0
-        ))
-
-        # 6) Print summary
-        print(f"Pixel Accuracy: {acc:.4f}")
-        print(f"Mean IoU      : {mean_iou:.4f}")
-        for lbl, p, r, f, iou in zip(present_labels, prec, rec, f1, ious):
-            print(f"LCZ {int(lbl):2d} → P {p:.3f}, R {r:.3f}, F1 {f:.3f}, IoU {iou:.3f}")
-
-
-

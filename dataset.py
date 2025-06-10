@@ -4,6 +4,86 @@ import tifffile
 import xarray as xr
 import numpy as np
 import os
+import pathlib
+
+def preprocess_and_save_tiles(prisma_30, s2, lcz_map, patch_size, stride, output_dir="./tiled_dataset"):
+    """
+    Preprocess images and save tiles to disk.
+
+    Args:
+        prisma_30 (str): Path to PRISMA-30 image
+        s2 (str): Path to Sentinel-2 image
+        lcz_map (str): Path to LCZ map
+        patch_size (int): Size of patches
+        stride (int): Stride for tiling
+        output_dir (str): Directory to save tiles
+    """
+    # Create output directories
+    base_dir = pathlib.Path(output_dir)
+
+    # Extract dataset name from the path
+    dataset_name = pathlib.Path(prisma_30).parent.name
+    dataset_dir = base_dir / dataset_name
+
+    prisma_dir = dataset_dir / "prisma_tiles"
+    s2_dir = dataset_dir / "s2_tiles"
+    lcz_dir = dataset_dir / "lcz_tiles"
+
+    # Create directories if they don't exist
+    for directory in [prisma_dir, s2_dir, lcz_dir]:
+        os.makedirs(directory, exist_ok=True)
+
+    # Load and preprocess images
+    H = 1266
+    W = 1315
+
+    # Load images
+    prisma_image = tifffile.imread(prisma_30)
+    lcz_image = tifffile.imread(lcz_map)
+    s2_image = tifffile.imread(s2)
+
+    # Crop and resize
+    crop_left = 1
+    crop_right = 0
+    crop_top = 0
+    crop_bottom = 1
+
+    H_lcz, W_lcz = lcz_image.shape
+    y0, y1 = crop_top, H_lcz - crop_bottom
+    x0, x1 = crop_left, W_lcz - crop_right
+
+    prisma_image = torch.from_numpy(prisma_image).float()
+    s2_image = torch.from_numpy(s2_image).float()
+    lcz_image = torch.from_numpy(lcz_image).float()
+
+    prisma_image_resized = torch.nn.functional.interpolate(
+        prisma_image.unsqueeze(0), size=(H, W), mode='bicubic', align_corners=False
+    ).squeeze().clone().detach()
+
+    lcz_image = lcz_image[y0:y1, x0:x1]
+    s2_image = s2_image.permute(2, 0, 1)
+
+    # Generate tile indices
+    tiles = [
+        (row, col)
+        for row in range(0, H - patch_size + 1, stride)
+        for col in range(0, W - patch_size + 1, stride)
+    ]
+
+    # Save tiles
+    for idx, (row, col) in enumerate(tiles):
+        # Extract patches
+        pr_patch = prisma_image_resized[:, row:row+patch_size, col:col+patch_size]
+        s2_patch = s2_image[:, row:row+patch_size, col:col+patch_size]
+        lcz_patch = lcz_image[row:row+patch_size, col:col+patch_size]
+
+        # Save patches as TIFF files
+        tifffile.imwrite(prisma_dir / f"tile_{idx:05d}.tif", pr_patch.numpy())
+        tifffile.imwrite(s2_dir / f"tile_{idx:05d}.tif", s2_patch.numpy())
+        tifffile.imwrite(lcz_dir / f"tile_{idx:05d}.tif", lcz_patch.numpy())
+
+    print(f"Saved {len(tiles)} tiles to {dataset_dir}")
+    return dataset_dir
 
 class LCZDataset(Dataset):
     def __init__(self, prisma_30, s2, lcz_map, lst, patch_size, stride, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset" ):
@@ -78,7 +158,8 @@ class LCZDataset(Dataset):
             # Use original approach
             pr_patch, s2_patch, lcz_patch = self.get_tile(tile_idx)
 
-        source = torch.cat((s2_patch, pr_patch, lst_patch), dim=0)
+        source = torch.cat((s2_patch, pr_patch), dim=0)
+        #source = torch.cat((s2_patch, pr_patch, lst_patch), dim=0)
         label = lcz_patch
         return {
             "image": source,
