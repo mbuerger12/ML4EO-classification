@@ -29,4 +29,4 @@ parser.add_argument('--rf-class-weight', default='balanced', help='Class weights
 
 #Include Layer args
 parser.add_argument('--layer', default='layer/Berlin', help='Layer name')
-parser.add_argument('--use_layer', default=True, help='Use layer data in training')
+parser.add_argument('--use_layer', default=False, help='Use layer data in training')

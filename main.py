@@ -13,6 +13,7 @@ from collections import defaultdict
 import os
 from utils.helper_functions import new_log, to_cuda
 import time
+from preprocess_tiles import preprocess_tiles
 from torchvision.models.segmentation import fcn_resnet50
 from arguments import train_parser
 import torch.nn as nn
@@ -476,57 +477,50 @@ class Trainer:
     def save_model(self):
         pass
 
-    def get_dataloaders_max(self, args):
+    def get_dataloaders(self, args):
+        if args.dataset == 'test':
+            print("create milano")
+            preprocess_tiles("./dataset/Milan/PRISMA_30.tif", "./dataset/Milan/S2.tif", "./dataset/Milan/LCZ_MAP.tif", "./", 64, 32, output_dir="./tiled_dataset", use_layer=False)
         print("use_layer", self.args.use_layer)
         if args.dataset == 'berlin':
             full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer)
+                                  "./dataset/berlin/LCZ_MAP.tif",64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
         elif args.dataset == 'athens':
-            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
-
             full_dataset = LCZDataset(
                 "./dataset/Athens/PRISMA_30.tif",
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer
+
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer
             )
         elif args.dataset == 'milan':
-            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
             full_dataset = LCZDataset(
                 "./dataset/Milan/PRISMA_30.tif",
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer
+                64, 32, transforms=None, use_tiled_dataset=False, tiled_dataset_dir="./tiled_dataset"
             )
         elif args.dataset == "full":
-
-            experiment_setup = ["berlin", "athens", "milan"]
-
-            lst_data_folder_path = "./"
             berlin_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif",
                                         "./dataset/berlin/S2.tif",
                                     "./dataset/berlin/LCZ_MAP.tif",
-                                        "./", 64,
+                                         64,
                                         32,
-                                        transforms=None,
-                                        use_tiled_dataset=True,
-                                        tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer)
+                                        use_tiled_dataset=False,
+                                        tiled_dataset_dir="./tiled_dataset")
             athens_dataset = LCZDataset(
                 "./dataset/Athens/PRISMA_30.tif",
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer
+                64, 32, use_tiled_dataset=False, tiled_dataset_dir="./tiled_dataset"
             )
             milan_dataset = LCZDataset(
                 "./dataset/Milan/PRISMA_30.tif",
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer
+                64, 32,  use_tiled_dataset=False, tiled_dataset_dir="./tiled_dataset"
             )
+
         if args.dataset == "full":
             full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
             test_dataset = milan_dataset
@@ -584,134 +578,6 @@ class Trainer:
         )
         return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
-    def get_dataloaders(self, args):
-        if args.dataset == 'test':
-            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                      "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None,
-                                      use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
-            full_dataset = Subset(full_dataset, list(range(10)))
-
-        if args.dataset == 'berlin':
-            full_dataset = LCZDataset(prisma_30="./dataset/berlin/PRISMA_30.tif",s2= "./dataset/berlin/S2.tif",
-                                  lcz_map="./dataset/berlin/LCZ_MAP.tif", lst_path=self.args.layer, patch_size=64, stride=32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer)
-        elif args.dataset == 'athens':
-            lst_data_folder_path = "./layer/Athens" # Corrected path for Athens's LST data
-
-            full_dataset = LCZDataset(
-                "./dataset/Athens/PRISMA_30.tif",
-                "./dataset/Athens/S2.tif",
-                "./dataset/Athens/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
-            )
-        elif args.dataset == 'milan':
-            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
-            full_dataset = LCZDataset(
-                "./dataset/Milan/PRISMA_30.tif",
-                "./dataset/Milan/S2.tif",
-                "./dataset/Milan/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
-            )
-
-        elif args.dataset == "full":
-
-            experiment_setup = ["berlin", "athens", "milan"]
-
-            lst_data_folder_path = "./"
-            berlin_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif",
-                                        "./dataset/berlin/S2.tif",
-                                    "./dataset/berlin/LCZ_MAP.tif",
-                                        "./", 64,
-                                        32,
-                                        transforms=None,
-                                        use_tiled_dataset=True,
-                                        tiled_dataset_dir="./tiled_dataset",
-                                        use_layer=self.args.use_layer,
-                                        lst_path=self.args.layer)
-            athens_dataset = LCZDataset(
-                "./dataset/Athens/PRISMA_30.tif",
-                "./dataset/Athens/S2.tif",
-                "./dataset/Athens/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
-            )
-            milan_dataset = LCZDataset(
-                "./dataset/Milan/PRISMA_30.tif",
-                "./dataset/Milan/S2.tif",
-                "./dataset/Milan/LCZ_MAP.tif",
-                lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
-            )
-
-
-        if args.dataset == "full":
-            full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
-            test_dataset = milan_dataset
-            test_idx = np.arange(len(test_dataset))
-            indices = np.arange(len(full_dataset))
-            N = len(full_dataset)
-            y_multi = np.zeros((N, 17), dtype=int)
-        else:
-            N = len(full_dataset)
-            indices = np.arange(N)
-            y_multi = np.zeros((N, 17), dtype=int)
-
-        if args.sampler == "random":
-            np.random.seed(42)
-            np.random.shuffle(indices)
-            split = int(0.8 * len(indices))
-            train_idx, val_idx = indices[:split], indices[split:]
-            test_idx = indices
-
-        elif args.sampler == "stratified":
-            msss = MultilabelStratifiedShuffleSplit(
-                n_splits=1, test_size=0.2, random_state=42
-            )
-            train_idx, val_idx = next(msss.split(indices, y_multi))
-
-        elif args.sampler == "skfold":
-            mskf = MultilabelStratifiedKFold(
-                n_splits=4, shuffle=True, random_state=42
-            )
-            for fold_idx, (tr, vl) in enumerate(mskf.split(indices, y_multi)):
-                if fold_idx == 3:
-                    train_idx, val_idx = tr, vl
-                    break
-
-
-
-
-        train_sampler = SubsetRandomSampler(train_idx)
-        val_sampler = SubsetRandomSampler(val_idx)
-        test_sampler = SubsetRandomSampler(test_idx)
-
-
-        train_loader = DataLoader(
-            full_dataset,
-            batch_size=8,
-            sampler=train_sampler,
-            num_workers=4,
-            pin_memory=True
-        )
-
-        val_loader = DataLoader(
-            full_dataset,
-            batch_size=8,
-            sampler=val_sampler,
-            num_workers=4,
-            pin_memory=True
-        )
-
-        test_loader = DataLoader(
-            full_dataset,
-            batch_size=8,
-            num_workers=4,
-            sampler=test_sampler,
-            pin_memory=True
-        )
-
-        return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
 
 
