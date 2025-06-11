@@ -85,7 +85,7 @@ class Trainer:
                 random_state=args.rf_random_state
             )
 
-        self.model = self.model.to(self.device)
+        
         self.experiment_folder = new_log(os.path.join(args.save_dir, args.dataset),
                                                                           args)[0]
         self.dataloaders = self.get_dataloaders(args)
@@ -97,6 +97,22 @@ class Trainer:
             save_code=True,
             reinit=True
         )
+        if args.model != "randomforest":
+            self.model = self.model.to(self.device)
+            wandb.watch(self.model, log="all", log_freq=args.logstep_train)
+            self.batch_size = args.batch_size
+            self.num_epochs = args.num_epochs
+            self.w_decay = 0.0001
+    
+            self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=self.w_decay)
+            self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.001, total_steps=self.batch_size*self.num_epochs*152, pct_start=0.1, anneal_strategy='cos', cycle_momentum=False)
+            self.epoch = 0
+            self.iter = 0
+            self.train_stats = defaultdict(lambda: np.nan)
+            self.val_stats = defaultdict(lambda: np.nan)
+            self.best_optimization_loss = np.inf
+            self.all_preds = []
+            self.all_labels = []
         wandb.watch(self.model, log="all", log_freq=args.logstep_train)
         self.batch_size = args.batch_size
         self.num_epochs = args.num_epochs
