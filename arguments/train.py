@@ -1,5 +1,5 @@
 import configargparse
-
+import os
 parser = configargparse.ArgumentParser()
 parser.add_argument('-c', '--config', is_config_file=True, help='Path to the config file', type=str)
 
