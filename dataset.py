@@ -129,6 +129,7 @@ class LCZDataset(Dataset):
         self.H = 1266
         self.W = 1315
         self.use_tiled_dataset = use_tiled_dataset
+        print("test")
 
         if self.use_tiled_dataset:
             dataset_name = pathlib.Path(prisma_30).parent.name

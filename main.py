@@ -32,7 +32,6 @@ class Trainer:
         self.args = args
         
         if self.args.use_layer:
-            print("FLAG USE LAYER")
             self.in_chans_for_model = 453 
         else:
             self.in_chans_for_model = 244
