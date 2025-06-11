@@ -27,4 +27,6 @@ parser.add_argument('--rf-random-state', default=42, help='Random seed for Rando
 parser.add_argument('--rf-class-weight', default='balanced', help='Class weights for Random Forest')
 
 
-
+#Include Layer args
+parser.add_argument('--layer', default='layer/Berlin', help='Layer name')
+parser.add_argument('--use_layer', default=True, help='Use layer data in training')

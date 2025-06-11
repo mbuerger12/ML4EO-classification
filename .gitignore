@@ -1,0 +1,8 @@
+*.tif
+*.tiff
+*.tif.gz
+*.tiff.gz
+*.nc
+*.xml
+*.pyc
+*.DS_Store

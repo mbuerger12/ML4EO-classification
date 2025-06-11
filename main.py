@@ -31,28 +31,33 @@ class Trainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.args = args
 
+        if self.args.use_layer:
+            self.in_chans_for_model = 453
+        else:
+            self.in_chans_for_model = 244
         self.metric_miou = torchmetrics.JaccardIndex(num_classes=18, average='macro', task='multiclass').to(self.device)
         self.metric_pixelacc = torchmetrics.Accuracy(num_classes= 18, task='multiclass').to(self.device)
         self.metric_dice = DiceScore(num_classes=18, average='macro').to(self.device)
 
 
         if args.model == "segformer":
+            print("in_chans_for_model", self.in_chans_for_model)
             self.model = smp.Segformer(
             encoder_name="mit_b2",
             encoder_weights="imagenet",
-            in_channels=244,
+            in_channels=self.in_chans_for_model,
             classes=18,
             activation=None
             )
 
         if args.model == "ownCNN":
-            self.model = ModelCNN1(in_channels=244, num_classes=18)
+            self.model = ModelCNN1(in_channels=self.in_chans_for_model, num_classes=18)
 
         elif args.model == "resnet50":
             self.model = fcn_resnet50(pretrained=False, num_classes=18)
 
             new_conv1 = nn.Conv2d(
-                in_channels=244,
+                in_channels=self.in_chans_for_model,
                 out_channels=64,
                 kernel_size=7,
                 stride=2,
@@ -66,7 +71,7 @@ class Trainer:
             self.model = smp.Unet(
                 encoder_name="resnet34",
                 encoder_weights="imagenet",
-                in_channels=244,
+                in_channels=self.in_chans_for_model,
                 classes=18,
                 activation=None
             )
@@ -108,6 +113,20 @@ class Trainer:
             self.best_optimization_loss = np.inf
             self.all_preds = []
             self.all_labels = []
+        wandb.watch(self.model, log="all", log_freq=args.logstep_train)
+        self.batch_size = args.batch_size
+        self.num_epochs = args.num_epochs
+        self.w_decay = 0.0001
+
+        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=self.w_decay)
+        self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.0001, total_steps=self.batch_size*self.num_epochs*152, pct_start=0.1, anneal_strategy='cos', cycle_momentum=False)
+        self.epoch = 0
+        self.iter = 0
+        self.train_stats = defaultdict(lambda: np.nan)
+        self.val_stats = defaultdict(lambda: np.nan)
+        self.best_optimization_loss = np.inf
+        self.all_preds = []
+        self.all_labels = []
 
     def __del__(self):
         pass
@@ -204,6 +223,7 @@ class Trainer:
                 loss = F.cross_entropy(output, sample['label'].long().to(self.device))
                 self.train_stats["loss"] += loss.detach().cpu().item()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0) # Adjust max_norm as needed
                 self.optimizer.step()
                 self.scheduler.step()
                 self.iter += 1
@@ -279,6 +299,7 @@ class Trainer:
         im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
         ax.set_title('Validation Confusion Matrix (Normalized)')
         plt.colorbar(im)
+
         # Set ticks and labels
         classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
         tick_marks = np.arange(len(classes))
@@ -426,7 +447,6 @@ class Trainer:
             "test/confusion_matrix": wandb.Image(fig)
         }, step=self.iter)
 
-
         plt.close(fig)
 
         # Ausgabe auf der Konsole
@@ -457,9 +477,10 @@ class Trainer:
         pass
 
     def get_dataloaders_max(self, args):
+        print("use_layer", self.args.use_layer)
         if args.dataset == 'berlin':
             full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
+                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer)
         elif args.dataset == 'athens':
             lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
 
@@ -468,7 +489,7 @@ class Trainer:
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer
             )
         elif args.dataset == 'milan':
             lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
@@ -477,7 +498,7 @@ class Trainer:
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer,lst_path=self.args.layer
             )
         elif args.dataset == "full":
 
@@ -491,20 +512,20 @@ class Trainer:
                                         32,
                                         transforms=None,
                                         use_tiled_dataset=True,
-                                        tiled_dataset_dir="./tiled_dataset")
+                                        tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer)
             athens_dataset = LCZDataset(
                 "./dataset/Athens/PRISMA_30.tif",
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer
             )
             milan_dataset = LCZDataset(
                 "./dataset/Milan/PRISMA_30.tif",
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset",use_layer=self.args.use_layer, lst_path=self.args.layer
             )
         if args.dataset == "full":
             full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
@@ -571,17 +592,17 @@ class Trainer:
             full_dataset = Subset(full_dataset, list(range(10)))
 
         if args.dataset == 'berlin':
-            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
-                                  "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
+            full_dataset = LCZDataset(prisma_30="./dataset/berlin/PRISMA_30.tif",s2= "./dataset/berlin/S2.tif",
+                                  lcz_map="./dataset/berlin/LCZ_MAP.tif", lst_path=self.args.layer, patch_size=64, stride=32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer)
         elif args.dataset == 'athens':
-            lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Athen.SEN3" # Corrected path for Athens's LST data
+            lst_data_folder_path = "./layer/Athens" # Corrected path for Athens's LST data
 
             full_dataset = LCZDataset(
                 "./dataset/Athens/PRISMA_30.tif",
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
             )
         elif args.dataset == 'milan':
             lst_data_folder_path = "../layer/S3B_SL_2_LST____2025060Milan.SEN3" # Corrected path for Milan's LST data
@@ -590,7 +611,7 @@ class Trainer:
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
             )
 
         elif args.dataset == "full":
@@ -605,20 +626,22 @@ class Trainer:
                                         32,
                                         transforms=None,
                                         use_tiled_dataset=True,
-                                        tiled_dataset_dir="./tiled_dataset")
+                                        tiled_dataset_dir="./tiled_dataset",
+                                        use_layer=self.args.use_layer,
+                                        lst_path=self.args.layer)
             athens_dataset = LCZDataset(
                 "./dataset/Athens/PRISMA_30.tif",
                 "./dataset/Athens/S2.tif",
                 "./dataset/Athens/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
             )
             milan_dataset = LCZDataset(
                 "./dataset/Milan/PRISMA_30.tif",
                 "./dataset/Milan/S2.tif",
                 "./dataset/Milan/LCZ_MAP.tif",
                 lst_data_folder_path,
-                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset"
+                64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset", use_layer=self.args.use_layer, lst_path=self.args.layer
             )
 
 
@@ -699,9 +722,6 @@ if __name__ == '__main__':
     torch.cuda.empty_cache()
     args = train_parser.parse_args()
     print(train_parser.format_values())
-
-    in_chans = 453 # 245 
-    num_classes = 18 
     
     trainer = Trainer(args)
     since = time.time()
