@@ -3,10 +3,6 @@
 # Define the full path to your Python executable
 PYTHON_EXECUTABLE="/opt/anaconda3/bin/python"
 
-# Path to your config file (if you are using one)
-# Uncomment and adjust if you are using config.ini
-# CONFIG_FILE="config.ini"
-
 # You can easily comment out or change these defaults
 DEFAULT_SAVE_DIR="./save/"
 DEFAULT_LOGSTEP_TRAIN=10
