@@ -10,13 +10,15 @@ parser.add_argument('--save-model', default='both', choices=['last', 'best', 'no
 parser.add_argument('--val-every-n-epochs', type=int, default=1, help='Validation interval in epochs')
 parser.add_argument('--wandb', action='store_true', default=False, help='Use Weights & Biases instead of TensorBoard')
 parser.add_argument('--wandb-project', type=str, default='ML4EO', help='Wandb project name')
-parser.add_argument('--num_epochs', default=100, help='number of epochs to train')
+parser.add_argument('--num_epochs', default=1, help='number of epochs to train')
 parser.add_argument('--batch-size', default=8, help='batch size')
-parser.add_argument('--dataset',default="berlin", help='dataset name')
+parser.add_argument('--dataset',default="full", help='dataset name')
 parser.add_argument('--lr', default=0.001, help='learning rate')
 parser.add_argument('--image-size', help='model name')
 parser.add_argument('--sampler', default='random', help='sampling strategy')
 parser.add_argument('--model', default='segformer', choices=['segformer', 'resnet50', 'ownCNN', 'randomforest'], help='model name')
+
+
 
 # Random Forest args
 parser.add_argument('--rf-n-estimators', default=100, help='Number of trees in Random Forest')

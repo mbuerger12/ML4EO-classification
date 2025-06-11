@@ -23,8 +23,8 @@ from iterstrat.ml_stratifiers import (
 import torchmetrics
 from torchmetrics.segmentation import DiceScore
 import matplotlib.pyplot as plt
-from modelCNN1 import ModelCNN1
-
+from ModelCNN1 import ModelCNN1
+from torch.utils.data import Subset
 
 class Trainer:
     def __init__(self, args: argparse.Namespace):
@@ -269,15 +269,16 @@ class Trainer:
         conf_matrix = confusion_matrix(all_labels, all_preds, labels=range(18))
 
         # Normalize the confusion matrix
-        conf_matrix_norm = conf_matrix.astype('float') / conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_norm = conf_matrix.sum(axis=1)[:, np.newaxis]
+        conf_matrix_norm = conf_matrix.astype('float') / conf_norm
         conf_matrix_norm = np.nan_to_num(conf_matrix_norm)  # Replace NaN with 0
+        conf_matrix_norm = conf_matrix_norm.T
 
         # Create a wandb Image with the confusion matrix
         fig, ax = plt.subplots(figsize=(12, 10))
         im = ax.imshow(conf_matrix_norm, interpolation='nearest', cmap=plt.cm.Blues, vmin=0, vmax=1)
         ax.set_title('Validation Confusion Matrix (Normalized)')
         plt.colorbar(im)
-
         # Set ticks and labels
         classes = [f"Class {i}" for i in range(18)]  # Replace with actual class names if available
         tick_marks = np.arange(len(classes))
@@ -290,21 +291,14 @@ class Trainer:
         thresh = conf_matrix_norm.max() / 2.
         for i in range(conf_matrix_norm.shape[0]):
             for j in range(conf_matrix_norm.shape[1]):
-                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
-                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
-                            ha="center", va="center",
-                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
-                            fontsize=8)
+                ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                        ha="center", va="center",
+                        fontsize=8)
 
-        ax.set_xlabel('Predicted Label')
-        ax.set_ylabel('True Label')
+        ax.set_xlabel('True Label')
+        ax.set_ylabel('Predicted Label')
         plt.tight_layout()
-
-        # Also log the raw confusion matrix as a table
-        wandb.log({"val/confusion_matrix_table": wandb.Table(
-            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
-            columns=["True", "Predicted", "Count"]
-        )}, step=self.iter)
+        plt.show()
 
         # Log to W&B at the current batch‐step
         wandb.log({
@@ -411,21 +405,13 @@ class Trainer:
         thresh = conf_matrix_norm.max() / 2.
         for i in range(conf_matrix_norm.shape[0]):
             for j in range(conf_matrix_norm.shape[1]):
-                if conf_matrix_norm[i, j] > 0.01:  # Only show values > 1%
-                    ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
-                            ha="center", va="center",
-                            color="white" if conf_matrix_norm[i, j] > thresh else "black",
-                            fontsize=8)
+                ax.text(j, i, f"{conf_matrix_norm[i, j]:.2f}",
+                        ha="center", va="center",
+                        fontsize=8)
 
         ax.set_xlabel('Predicted Label')
         ax.set_ylabel('True Label')
         plt.tight_layout()
-
-        # Also log the raw confusion matrix as a table
-        wandb.log({"test/confusion_matrix_table": wandb.Table(
-            data=[[i, j, conf_matrix[i, j]] for i in range(18) for j in range(18) if conf_matrix[i, j] > 0],
-            columns=["True", "Predicted", "Count"]
-        )}, step=self.iter)
 
         # Ergebnisse in W&B loggen
         wandb.log({
@@ -439,6 +425,7 @@ class Trainer:
             "test/f1": f1,
             "test/confusion_matrix": wandb.Image(fig)
         }, step=self.iter)
+
 
         plt.close(fig)
 
@@ -577,6 +564,12 @@ class Trainer:
         return {'train': train_loader, 'val': val_loader, 'test': test_loader}
 
     def get_dataloaders(self, args):
+        if args.dataset == 'test':
+            full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
+                                      "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None,
+                                      use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
+            full_dataset = Subset(full_dataset, list(range(10)))
+
         if args.dataset == 'berlin':
             full_dataset = LCZDataset("./dataset/berlin/PRISMA_30.tif", "./dataset/berlin/S2.tif",
                                   "./dataset/berlin/LCZ_MAP.tif", "./", 64, 32, transforms=None, use_tiled_dataset=True, tiled_dataset_dir="./tiled_dataset")
