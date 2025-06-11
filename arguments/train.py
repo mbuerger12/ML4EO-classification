@@ -7,7 +7,7 @@ parser.add_argument('-c', '--config', is_config_file=True, help='Path to the con
 parser.add_argument('--save-dir', default="./save/" , help='Path to directory where models and logs should be saved')
 parser.add_argument('--logstep-train', default=10, type=int, help='Training log interval in steps')
 parser.add_argument('--save-model', default='both', choices=['last', 'best', 'no', 'both'])
-parser.add_argument('--val-every-n-epochs', type=int, default=1, help='Validation interval in epochs')
+parser.add_argument('--val-every-n-epochs', type=int, default=5, help='Validation interval in epochs')
 parser.add_argument('--wandb', action='store_true', default=False, help='Use Weights & Biases instead of TensorBoard')
 parser.add_argument('--wandb-project', type=str, default='ML4EO', help='Wandb project name')
 parser.add_argument('--num_epochs', default=1, help='number of epochs to train')

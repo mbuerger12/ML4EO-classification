@@ -148,7 +148,8 @@ class LCZDataset(Dataset):
 
         source = torch.cat((s2_patch, pr_patch), dim=0)
         label = lcz_patch
-
+        print(np.isnan(source).any())
+        print(np.isnan(label).any())
         return {
             "image": source,
             "label": label,

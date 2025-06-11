@@ -31,11 +31,7 @@ class Trainer:
     def __init__(self, args: argparse.Namespace):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.args = args
-
-        if self.args.use_layer:
-            self.in_chans_for_model = 453
-        else:
-            self.in_chans_for_model = 244
+        self.in_chans_for_model = 244
         self.metric_miou = torchmetrics.JaccardIndex(num_classes=18, average='macro', task='multiclass').to(self.device)
         self.metric_pixelacc = torchmetrics.Accuracy(num_classes= 18, task='multiclass').to(self.device)
         self.metric_dice = DiceScore(num_classes=18, average='macro').to(self.device)
@@ -106,7 +102,7 @@ class Trainer:
             self.w_decay = 0.0001
     
             self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=self.w_decay)
-            self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.001, total_steps=self.batch_size*self.num_epochs*152, pct_start=0.1, anneal_strategy='cos', cycle_momentum=False)
+            self.scheduler = optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.0001, total_steps=self.batch_size*self.num_epochs*152, pct_start=0.1, anneal_strategy='cos', cycle_momentum=False)
             self.epoch = 0
             self.iter = 0
             self.train_stats = defaultdict(lambda: np.nan)
@@ -522,8 +518,8 @@ class Trainer:
             )
 
         if args.dataset == "full":
-            full_dataset = torch.utils.data.ConcatDataset([berlin_dataset, athens_dataset])
-            test_dataset = milan_dataset
+            full_dataset = torch.utils.data.ConcatDataset([milan_dataset, athens_dataset])
+            test_dataset = berlin_dataset
             test_idx = np.arange(len(test_dataset))
             indices = np.arange(len(full_dataset))
             N = len(full_dataset)
